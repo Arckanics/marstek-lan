@@ -9,8 +9,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --locked -- -D warnings
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
