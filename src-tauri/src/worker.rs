@@ -2,17 +2,18 @@
 //! Il porte aussi le moteur de pilotage (plan, règles SOC, action manuelle) et les alertes.
 
 use crate::api::{
-    ApiError, BatStatus, BleStatus, Client, DeviceInfo, Direction, EmStatus, EsMode, EsStatus, ModeConfig, ModeReq,
-    PvStatus, Slot, WifiStatus, manual_slots,
+    self, ApiError, BatStatus, BleStatus, Client, DeviceInfo, Direction, EmStatus, EsMode, EsStatus, Link, ModeConfig,
+    ModeReq, PvStatus, Slot, WifiStatus, manual_slots,
 };
 use crate::clock::{self, MINUTE};
-use crate::control::{self, Action, Control, Engine, Point, Side, SlotTest, Source};
+use crate::control::{self, Action, Control, Engine, OFFLINE_AFTER, Point, Side, SlotTest, Source};
 use crate::history::{Counters, History, Sample};
 use crate::plan::{Plan, compile_plan};
 use crate::settings::{self, Notify, Rules};
 use crate::tray::{self, Flow};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
@@ -23,6 +24,12 @@ use tauri_plugin_notification::NotificationExt;
 /// La batterie supporte mal les requêtes trop rapprochées.
 const PAUSE: Duration = Duration::from_millis(250);
 const POLL: Duration = Duration::from_secs(10);
+const POLL_MAX: Duration = Duration::from_secs(60);
+
+/// Hors ligne, le sondage s'espace (10, 20, 40, 60 s) pour ne pas enchaîner les timeouts ; un succès le ramène à 10 s.
+fn poll_interval(failures: u32) -> Duration {
+    (POLL * (1 << failures.min(3))).min(POLL_MAX)
+}
 
 #[derive(Debug)]
 pub enum Write {
@@ -74,7 +81,7 @@ impl Worker {
             let mut state = State::new(app);
             state.reload();
             loop {
-                match rx.recv_timeout(POLL) {
+                match rx.recv_timeout(poll_interval(state.fails)) {
                     Ok(Cmd::Connect(addr)) => state.connect(addr),
                     Ok(Cmd::Refresh) => state.poll(true),
                     Ok(Cmd::Reload) => {
@@ -95,6 +102,7 @@ impl Worker {
                     Err(RecvTimeoutError::Timeout) => {
                         state.poll(false);
                         state.tick();
+                        state.relocate();
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
@@ -148,8 +156,11 @@ macro_rules! snapshot {
         /// Dernier état connu, émis tel quel au front.
         #[derive(Default, Serialize)]
         struct Snapshot {
-            /// Date de lecture, ms depuis l'epoch.
+            /// Date du sondage, ms depuis l'epoch.
             ts: u64,
+            /// Date de la dernière lecture réussie de chaque section : une lecture ratée garde l'ancienne valeur.
+            updated: HashMap<&'static str, u64>,
+            link: Link,
             $(
                 #[serde(skip_serializing_if = "Option::is_none")]
                 $field: Option<$ty>,
@@ -162,6 +173,13 @@ snapshot!(
     device: DeviceInfo, wifi: WifiStatus, ble: BleStatus, bat: BatStatus,
     es: EsStatus, mode: EsMode, em: EmStatus, pv: PvStatus
 );
+
+impl Snapshot {
+    /// La section si elle a été lue pendant le dernier sondage, sinon `None`.
+    fn fresh<'a, T>(&self, section: &'a Option<T>, key: &str) -> Option<&'a T> {
+        section.as_ref().filter(|_| self.updated.get(key) == Some(&self.ts))
+    }
+}
 
 /// Test hors créneaux en cours : on relève la puissance à chaque sondage jusqu'à `ends`.
 struct Test {
@@ -185,6 +203,9 @@ struct State {
     /// Le dernier sondage a répondu.
     online: bool,
     last_ok: Instant,
+    /// Sondages ratés d'affilée.
+    fails: u32,
+    last_search: Option<Instant>,
     low_notified: bool,
     offline_notified: bool,
     engine_failed: bool,
@@ -249,6 +270,8 @@ impl State {
             test: None,
             online: false,
             last_ok: Instant::now(),
+            fails: 0,
+            last_search: None,
             low_notified: false,
             offline_notified: false,
             engine_failed: false,
@@ -276,7 +299,8 @@ impl State {
     }
 
     fn soc(&self) -> Option<f64> {
-        self.snap.es.as_ref().and_then(|e| e.bat_soc).or_else(|| self.snap.bat.as_ref().and_then(|b| b.soc))
+        let s = &self.snap;
+        s.fresh(&s.es, "es").and_then(|e| e.bat_soc).or_else(|| s.fresh(&s.bat, "bat").and_then(|b| b.soc))
     }
 
     /// Moteur à l'état de connexion : le plan est renvoyé au premier sondage.
@@ -292,6 +316,8 @@ impl State {
                 self.reset_engine();
                 self.test = None;
                 self.last_ok = Instant::now();
+                self.fails = 0;
+                self.last_search = None;
                 self.offline_notified = false;
                 self.log(format!("Connexion à {addr}"));
                 self.poll(true);
@@ -300,28 +326,39 @@ impl State {
         }
     }
 
-    /// Lit chaque bloc séparément : un appel en échec n'empêche pas les autres.
+    /// Lit chaque bloc séparément : un appel en échec n'empêche pas les autres et garde la dernière valeur connue.
     /// `full` relit aussi les infos statiques (appareil, Wi-Fi, BLE).
-    // shortcut: batterie hors ligne = 5 timeouts de 3 s par sondage ; à couper au premier timeout si ça gêne.
     fn poll(&mut self, full: bool) {
         let Some(c) = self.client.as_mut() else { return };
         let (app, s) = (&self.app, &mut self.snap);
-        if full {
-            s.device = step(app, "Appareil", c.device_info());
-            s.wifi = step(app, "Wi-Fi", c.wifi_status());
-            s.ble = step(app, "Bluetooth", c.ble_status());
+        let now = clock::now_ms() as u64;
+        macro_rules! read {
+            ($key:ident, $name:expr, $call:expr) => {
+                step(app, $name, stringify!($key), $call, &mut s.$key, &mut s.updated, now)
+            };
         }
-        s.bat = step(app, "Batterie", c.bat_status());
-        s.es = step(app, "Système", c.es_status());
-        s.mode = step(app, "Mode", c.es_mode());
-        s.em = step(app, "Compteur", c.em_status());
-        s.pv = step(app, "Solaire", c.pv_status());
-        s.ts = clock::now_ms() as u64;
+        // Sans réponse de la batterie, chaque lecture suivante coûterait ses trois tentatives pour rien.
+        if !read!(bat, "Batterie", c.bat_status()) {
+            if full {
+                read!(device, "Appareil", c.device_info());
+                read!(wifi, "Wi-Fi", c.wifi_status());
+                read!(ble, "Bluetooth", c.ble_status());
+            }
+            read!(es, "Système", c.es_status());
+            read!(mode, "Mode", c.es_mode());
+            read!(em, "Compteur", c.em_status());
+            read!(pv, "Solaire", c.pv_status());
+        }
+        s.ts = now;
+        s.link = Link { rssi: s.wifi.as_ref().and_then(|w| w.rssi), ..c.link() };
         let _ = app.emit("status", &*s);
-        self.online = s.bat.is_some() || s.es.is_some() || s.mode.is_some();
+        self.online = s.updated.values().any(|&t| t == now);
         if self.online {
             self.last_ok = Instant::now();
+            self.fails = 0;
             self.record_history();
+        } else {
+            self.fails = self.fails.saturating_add(1);
         }
         self.update_tray();
         if full {
@@ -330,12 +367,44 @@ impl State {
         }
     }
 
+    /// Un historique de valeurs fraîches seulement : une valeur gardée après une lecture ratée serait réécrite à tort.
     fn record_history(&self) {
         let s = &self.snap;
-        let (sample, counters) = history_rows(s.es.as_ref(), s.em.as_ref(), self.soc());
+        let (es, em) = (s.fresh(&s.es, "es"), s.fresh(&s.em, "em"));
+        let (sample, counters) = history_rows(es, em, self.soc());
         if let Err(e) = self.app.state::<History>().record(s.ts as i64, sample, counters) {
             self.log(format!("Historique : {e}"));
         }
+    }
+
+    /// Hors ligne depuis `OFFLINE_AFTER` : un bail DHCP a pu changer l'IP. Cherche la batterie par son adresse MAC.
+    fn relocate(&mut self) {
+        let Some(addr) = self.client.as_ref().map(Client::addr) else { return };
+        let due = self.last_search.is_none_or(|t| t.elapsed() >= OFFLINE_AFTER);
+        if self.online || self.last_ok.elapsed() < OFFLINE_AFTER || !due {
+            return;
+        }
+        let s = &self.snap;
+        let mac = s.device.as_ref().and_then(|d| d.wifi_mac.clone()).or_else(|| s.wifi.as_ref().and_then(|w| w.wifi_mac.clone()));
+        let Some(mac) = mac else { return };
+        self.last_search = Some(Instant::now());
+        let scan = settings::load(&self.app).scan_range.filter(|r| !r.trim().is_empty());
+        let mut found = Vec::new();
+        for range in std::iter::once(None).chain(scan.as_deref().map(Some)) {
+            match api::discover(range, addr.port()) {
+                Ok(devices) => found.extend(devices),
+                Err(e) => self.log(format!("Recherche de la batterie : {e}")),
+            }
+        }
+        let Some(new) = api::find_moved(&found, &mac, addr.ip()).and_then(|d| Some(SocketAddr::new(d.ip.parse().ok()?, d.port))) else {
+            return;
+        };
+        self.log(format!("Batterie retrouvée à {} (elle était à {})", new.ip(), addr.ip()));
+        self.connect(new);
+        if let Err(e) = settings::save_last_ip(&self.app, &new.ip().to_string()) {
+            self.log(format!("Nouvelle IP non enregistrée : {e}"));
+        }
+        let _ = self.app.emit("connected", new.ip().to_string());
     }
 
     fn update_tray(&mut self) {
@@ -509,8 +578,11 @@ impl State {
         let Some(c) = self.client.as_mut() else { return Err("aucune batterie connectée".into()) };
         let _ = self.app.emit("busy", true);
         let label = w.label();
-        let r = run(c, w).map_err(|e| e.to_string());
-        let _ = self.app.emit("busy", false);
+        let app = &self.app;
+        let r = run(c, w, &|m| {
+            let _ = app.emit("log", m);
+        });
+        let _ = app.emit("busy", false);
         self.log(match &r {
             Ok(v) if v.iter().all(|&ok| ok) => format!("{label} : accepté"),
             Ok(_) => format!("{label} : refusé par la batterie"),
@@ -573,28 +645,91 @@ impl State {
     }
 }
 
-fn step<T>(app: &AppHandle, name: &str, r: Result<T, ApiError>) -> Option<T> {
+/// Garde la valeur lue et sa date ; rend `true` si la liaison est perdue (pas de réponse), pas si la batterie refuse.
+fn step<T>(
+    app: &AppHandle,
+    name: &str,
+    key: &'static str,
+    r: Result<T, ApiError>,
+    slot: &mut Option<T>,
+    updated: &mut HashMap<&'static str, u64>,
+    now: u64,
+) -> bool {
     thread::sleep(PAUSE);
-    r.map_err(|e| {
-        let _ = app.emit("log", format!("{name} : {e}"));
-    })
-    .ok()
+    match r {
+        Ok(v) => {
+            *slot = Some(v);
+            updated.insert(key, now);
+            false
+        }
+        Err(e) => {
+            let _ = app.emit("log", format!("{name} : {e}"));
+            matches!(e, ApiError::Timeout | ApiError::Io(_))
+        }
+    }
 }
 
-fn run(c: &mut Client, w: Write) -> Result<Vec<bool>, ApiError> {
+/// Rejoue une fois les créneaux dont l'envoi a échoué : une seule perte de paquet ne doit pas laisser un plan à moitié écrit.
+fn second_pass(
+    mut results: Vec<Result<bool, ApiError>>,
+    announce: impl FnOnce(&[usize]),
+    mut send: impl FnMut(usize) -> Result<bool, ApiError>,
+) -> Vec<Result<bool, ApiError>> {
+    let failed: Vec<usize> = (0..results.len()).filter(|&i| results[i].is_err()).collect();
+    // Tout a échoué : la liaison est coupée, rejouer doublerait l'attente (3 tentatives par créneau) pour rien.
+    if !failed.is_empty() && failed.len() < results.len() {
+        announce(&failed);
+        for i in failed {
+            results[i] = send(i);
+        }
+    }
+    results
+}
+
+fn slot_numbers(indexes: &[usize]) -> String {
+    indexes.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// Résultat par créneau ; l'erreur nomme ceux que la batterie n'a jamais confirmés.
+fn slots_outcome(results: Vec<Result<bool, ApiError>>) -> Result<Vec<bool>, String> {
+    let missing: Vec<usize> = (0..results.len()).filter(|&i| results[i].is_err()).collect();
+    if !missing.is_empty() {
+        return Err(format!("créneaux non écrits : {}", slot_numbers(&missing)));
+    }
+    Ok(results.into_iter().map(|r| r.unwrap_or(false)).collect())
+}
+
+fn run(c: &mut Client, w: Write, progress: &dyn Fn(String)) -> Result<Vec<bool>, String> {
     let r = match w {
-        Write::Mode(m) => c.set_mode(&m.config()).map(|ok| vec![ok]),
-        Write::Slots(slots) | Write::Plan(_, slots) => manual_slots(&slots)?
-            .into_iter()
-            .map(|m| {
-                let r = c.set_mode(&ModeConfig::Manual(m));
+        Write::Mode(m) => {
+            let cfg = m.config();
+            let r = c.set_mode(&cfg).or_else(|e| {
+                // Réponse perdue, ordre peut-être passé : la batterie dit dans quel mode elle est.
+                // shortcut: le mode passif n'est pas confirmé (sa puissance n'est pas comparée, un passif déjà actif validerait à tort) ; à affiner si ça gêne.
+                if !matches!(e, ApiError::Timeout) || matches!(cfg, ModeConfig::Passive { .. }) {
+                    return Err(e);
+                }
+                match c.es_mode().ok().and_then(|m| m.mode) {
+                    Some(mode) if mode == cfg.name() => Ok(true),
+                    _ => Err(e),
+                }
+            });
+            r.map(|ok| vec![ok]).map_err(|e| e.to_string())
+        }
+        Write::Slots(slots) | Write::Plan(_, slots) => {
+            let slots = manual_slots(&slots).map_err(|e| e.to_string())?;
+            let mut send = |i: usize| {
+                let r = c.set_mode(&ModeConfig::Manual(slots[i].clone()));
                 thread::sleep(PAUSE);
                 r
-            })
-            .collect(),
-        Write::Dod(v) => c.set_dod(v).map(|ok| vec![ok]),
-        Write::Led(on) => c.set_led(on).map(|ok| vec![ok]),
-        Write::Ble(on) => c.set_ble(on).map(|ok| vec![ok]),
+            };
+            let first = (0..slots.len()).map(&mut send).collect();
+            let announce = |failed: &[usize]| progress(format!("Créneaux {} sans réponse : nouvelle tentative", slot_numbers(failed)));
+            slots_outcome(second_pass(first, announce, send))
+        }
+        Write::Dod(v) => c.set_dod(v).map(|ok| vec![ok]).map_err(|e| e.to_string()),
+        Write::Led(on) => c.set_led(on).map(|ok| vec![ok]).map_err(|e| e.to_string()),
+        Write::Ble(on) => c.set_ble(on).map(|ok| vec![ok]).map_err(|e| e.to_string()),
     };
     thread::sleep(PAUSE);
     r
@@ -618,5 +753,81 @@ mod tests {
     fn passive_seconds_only_for_passive_mode() {
         assert_eq!(passive_seconds(&ModeReq::Auto), None);
         assert_eq!(passive_seconds(&ModeReq::Passive { direction: Direction::Charge, power: 100, seconds: 90 }), Some(90));
+    }
+
+    #[test]
+    fn poll_interval_backs_off_to_a_minute() {
+        let secs: Vec<u64> = (0..6).map(|n| poll_interval(n).as_secs()).collect();
+        assert_eq!(secs, [10, 20, 40, 60, 60, 60]);
+        assert_eq!(poll_interval(u32::MAX), POLL_MAX);
+    }
+
+    fn lost() -> Result<bool, ApiError> {
+        Err(ApiError::Timeout)
+    }
+
+    #[test]
+    fn second_pass_only_replays_failed_slots() {
+        let first = vec![Ok(true), lost(), Ok(false), lost()];
+        let (mut sent, mut announced) = (Vec::new(), Vec::new());
+        let r = second_pass(first, |f| announced = f.to_vec(), |i| {
+            sent.push(i);
+            if i == 1 { Ok(true) } else { lost() }
+        });
+        assert_eq!((sent, announced), (vec![1, 3], vec![1, 3]));
+        assert_eq!(slots_outcome(r.into_iter().collect()).unwrap_err(), "créneaux non écrits : 4");
+    }
+
+    #[test]
+    fn second_pass_skips_replay_when_every_slot_failed() {
+        let r = second_pass(vec![lost(), lost()], |_| panic!("liaison coupée"), |_| panic!("liaison coupée"));
+        assert_eq!(slots_outcome(r).unwrap_err(), "créneaux non écrits : 1, 2");
+    }
+
+    #[test]
+    fn second_pass_stays_quiet_when_everything_was_answered() {
+        let r = second_pass(vec![Ok(true), Ok(false)], |_| panic!("rien à rejouer"), |_| panic!("rien à rejouer"));
+        assert_eq!(slots_outcome(r).unwrap(), [true, false]);
+    }
+
+    #[test]
+    fn unconfirmed_slots_are_all_named() {
+        let err = slots_outcome(vec![lost(), Ok(true), lost()]).unwrap_err();
+        assert_eq!(err, "créneaux non écrits : 1, 3");
+    }
+
+    #[test]
+    fn fresh_ignores_sections_kept_from_an_earlier_poll() {
+        let mut s = Snapshot { ts: 20, ..Default::default() };
+        s.es = Some(EsStatus::default());
+        s.bat = Some(BatStatus::default());
+        s.updated.insert("es", 20);
+        s.updated.insert("bat", 10);
+        assert!(s.fresh(&s.es, "es").is_some());
+        assert!(s.fresh(&s.bat, "bat").is_none());
+        assert!(s.fresh(&s.em, "em").is_none());
+    }
+
+    #[test]
+    fn lost_set_result_counts_when_the_mode_is_applied() {
+        use std::net::UdpSocket;
+        let server = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        server.set_read_timeout(Some(Duration::from_millis(400))).unwrap();
+        let mut client = Client::new(server.local_addr().unwrap()).unwrap();
+        client.waits = [Duration::from_millis(40); 3];
+        let t = thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok((n, from)) = server.recv_from(&mut buf) {
+                let req: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+                // La commande est ignorée (réponse perdue), la lecture du mode répond.
+                if req["method"] == "ES.GetMode" {
+                    let reply = json!({ "id": req["id"], "result": { "mode": "UPS" } });
+                    server.send_to(&serde_json::to_vec(&reply).unwrap(), from).unwrap();
+                }
+            }
+        });
+        assert_eq!(run(&mut client, Write::Mode(ModeReq::Ups), &|_| ()), Ok(vec![true]));
+        assert!(run(&mut client, Write::Mode(ModeReq::Auto), &|_| ()).is_err());
+        t.join().unwrap();
     }
 }

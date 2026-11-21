@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { app, start } from "./lib/state.svelte";
+  import { app, clock, start } from "./lib/state.svelte";
   import Devices from "./components/Devices.svelte";
   import Status from "./components/Status.svelte";
   import Modes from "./components/Modes.svelte";
@@ -9,6 +9,7 @@
   import Settings from "./components/Settings.svelte";
   import DevicePanel from "./components/DevicePanel.svelte";
   import Journal from "./components/Journal.svelte";
+  import { QUALITY_LABEL, linkTip, quality } from "./lib/link";
 
   const tabs = [
     { id: "devices", label: "Appareils" },
@@ -49,7 +50,11 @@
     </div>
     <div class="conn" aria-live="polite">
       {#if app.busy}
-        <span class="badge"><span class="spinner" aria-hidden="true"></span>Écriture en cours</span>
+        <span class="badge"><span class="spinner" aria-hidden="true"></span>Écriture en cours{app.progress ? ` · ${app.progress}` : ""}</span>
+      {/if}
+      {#if app.connectedIp && app.snapshot}
+        {@const q = quality(app.snapshot, clock.now)}
+        <span class="badge" title={linkTip(app.snapshot)}><span class="dot {q}"></span>Liaison {QUALITY_LABEL[q]}</span>
       {/if}
       <span class="badge">
         <span class="dot" class:on={app.connectedIp}></span>

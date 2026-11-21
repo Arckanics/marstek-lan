@@ -114,7 +114,10 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--primary)
   font-size: 0.8rem; font-weight: 500;
 }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.dot.on { background: var(--charge); }
+.dot.on, .dot.good { background: var(--charge); }
+.dot.fair { background: var(--solar); }
+.dot.poor { background: var(--discharge); }
+.dot.offline { background: var(--danger); }
 
 .empty {
   display: grid; justify-items: center; gap: 10px; padding: 48px 24px; text-align: center;

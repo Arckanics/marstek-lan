@@ -84,6 +84,7 @@ pub struct Settings {
     pub sent_plan: Option<Plan>,
     pub rules: Rules,
     pub notify: Notify,
+    pub scan_range: Option<String>,
 }
 
 fn read<T: DeserializeOwned + Default>(store: &Store<tauri::Wry>, key: &str) -> T {
@@ -97,6 +98,7 @@ pub fn load(app: &AppHandle) -> Settings {
         sent_plan: read(&store, "sentPlan"),
         rules: read(&store, "rules"),
         notify: read(&store, "notify"),
+        scan_range: read(&store, "scanRange"),
     }
 }
 
@@ -110,5 +112,12 @@ pub fn save_outside_slots(app: &AppHandle, value: serde_json::Value) -> Result<(
 pub fn save_sent_plan(app: &AppHandle, plan: &Plan) -> Result<(), String> {
     let store = app.store(FILE).map_err(|e| e.to_string())?;
     store.set("sentPlan", serde_json::to_value(plan).map_err(|e| e.to_string())?);
+    store.save().map_err(|e| e.to_string())
+}
+
+/// La batterie a changé d'IP : le front la retrouve au prochain démarrage.
+pub fn save_last_ip(app: &AppHandle, ip: &str) -> Result<(), String> {
+    let store = app.store(FILE).map_err(|e| e.to_string())?;
+    store.set("lastIp", ip);
     store.save().map_err(|e| e.to_string())
 }

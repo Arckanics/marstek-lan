@@ -7,6 +7,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -18,7 +19,10 @@ pub const SLOTS: usize = 10;
 /// Signe de la puissance en mode Manuel et Passif : non documenté, charge = négatif
 /// (à vérifier sur la batterie ; c'est le seul endroit à changer).
 pub const CHARGE_SIGN: i32 = -1;
-const TIMEOUT: Duration = Duration::from_secs(3);
+/// Attente de la réponse à chaque tentative : un Wi-Fi faible perd des paquets, on renvoie plutôt que d'attendre.
+const WAITS: [Duration; 3] = [Duration::from_millis(1500), Duration::from_secs(2), Duration::from_secs(3)];
+/// Requêtes retenues pour juger la qualité de la liaison.
+const WINDOW: usize = 20;
 const SCAN_WAIT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug)]
@@ -230,6 +234,17 @@ pub enum ModeConfig {
 }
 
 impl ModeConfig {
+    /// Valeur de `mode` dans `ES.SetMode` et `ES.GetMode`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Ai => "AI",
+            Self::Ups => "UPS",
+            Self::Manual(_) => "Manual",
+            Self::Passive { .. } => "Passive",
+        }
+    }
+
     fn to_json(&self) -> Value {
         match self {
             Self::Auto => json!({ "mode": "Auto", "auto_cfg": { "enable": 1 } }),
@@ -260,30 +275,90 @@ pub struct Client {
     sock: UdpSocket,
     addr: SocketAddr,
     next_id: u64,
+    pub(crate) waits: [Duration; 3],
+    /// Une entrée par requête : le RTT de la tentative réussie, `None` si elle a échoué.
+    recent: VecDeque<Option<Duration>>,
+}
+
+/// Qualité de la liaison, d'après les dernières requêtes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Link {
+    pub ok: u32,
+    pub total: u32,
+    /// Médiane des RTT des requêtes réussies, en ms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rssi: Option<f64>,
+}
+
+impl Link {
+    fn of<'a>(recent: impl Iterator<Item = &'a Option<Duration>>) -> Self {
+        let (mut ok, mut total, mut rtts) = (0, 0, Vec::new());
+        for r in recent {
+            total += 1;
+            if let Some(rtt) = r {
+                ok += 1;
+                rtts.push(rtt.as_millis() as u32);
+            }
+        }
+        rtts.sort_unstable();
+        Self { ok, total, rtt_ms: rtts.get(rtts.len() / 2).copied(), rssi: None }
+    }
 }
 
 impl Client {
     pub fn new(addr: SocketAddr) -> Result<Self, ApiError> {
         let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-        sock.set_read_timeout(Some(TIMEOUT))?;
         // Départ aléatoire : une réponse tardive d'une session précédente ne porte pas l'id attendu.
         let next_id = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::from(d.subsec_nanos()));
-        Ok(Self { sock, addr, next_id })
+        Ok(Self { sock, addr, next_id, waits: WAITS, recent: VecDeque::new() })
     }
 
-    /// Envoie une requête et attend la réponse portant le même `id`.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn link(&self) -> Link {
+        Link::of(self.recent.iter())
+    }
+
+    /// Envoie une requête et attend la réponse portant le même `id`, en la renvoyant (même `id`) si elle tarde :
+    /// la réponse à une tentative précédente reste acceptée.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, ApiError> {
         self.next_id += 1;
-        let id = self.next_id;
-        let req = json!({ "id": id, "method": method, "params": params });
-        self.sock.send_to(&serde_json::to_vec(&req)?, self.addr)?;
+        let req = serde_json::to_vec(&json!({ "id": self.next_id, "method": method, "params": params }))?;
+        let sent = self.attempts(self.next_id, &req);
+        if self.recent.len() == WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(sent.as_ref().ok().map(|(_, rtt)| *rtt));
+        sent?.0
+    }
 
-        let deadline = Instant::now() + TIMEOUT;
+    /// Une réponse de la batterie, même un refus, prouve que la liaison marche ; son RTT est celui de la tentative réussie.
+    fn attempts(&self, id: u64, req: &[u8]) -> Result<(Result<Value, ApiError>, Duration), ApiError> {
+        for wait in self.waits {
+            let sent = Instant::now();
+            self.sock.send_to(req, self.addr)?;
+            if let Some(reply) = self.await_reply(id, sent + wait)? {
+                return Ok((reply, sent.elapsed()));
+            }
+        }
+        Err(ApiError::Timeout)
+    }
+
+    /// `Ok(None)` : rien avant l'échéance.
+    fn await_reply(&self, id: u64, deadline: Instant) -> Result<Option<Result<Value, ApiError>>, ApiError> {
         let mut buf = [0u8; 4096];
-        while Instant::now() < deadline {
+        while let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+            self.sock.set_read_timeout(Some(left))?;
             let (n, from) = match self.sock.recv_from(&mut buf) {
                 Ok(v) => v,
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
+                // Sous Windows un ICMP « port fermé » (paquet précédent) fait échouer recv_from.
+                Err(e) if e.kind() == ErrorKind::ConnectionReset => continue,
                 Err(e) => return Err(e.into()),
             };
             if from.ip() != self.addr.ip() {
@@ -293,15 +368,15 @@ impl Client {
             if resp.get("id").and_then(Value::as_u64) != Some(id) {
                 continue; // réponse à une ancienne requête
             }
-            if let Some(err) = resp.get("error") {
-                return Err(ApiError::Device {
+            return Ok(Some(match resp.get("error") {
+                Some(err) => Err(ApiError::Device {
                     code: err.get("code").and_then(Value::as_i64).unwrap_or(0),
                     message: err.get("message").and_then(Value::as_str).unwrap_or("?").to_owned(),
-                });
-            }
-            return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+                }),
+                None => Ok(resp.get("result").cloned().unwrap_or(Value::Null)),
+            }));
         }
-        Err(ApiError::Timeout)
+        Ok(None)
     }
 
     fn get<T: DeserializeOwned>(&mut self, method: &str) -> Result<T, ApiError> {
@@ -365,6 +440,13 @@ impl Client {
 }
 
 // ---------- Balayage ----------
+
+/// La batterie connue par son adresse MAC Wi-Fi, retrouvée à une autre IP (bail DHCP changé).
+pub fn find_moved<'a>(found: &'a [Device], wifi_mac: &str, current: IpAddr) -> Option<&'a Device> {
+    let norm = |m: &str| m.chars().filter(char::is_ascii_hexdigit).collect::<String>().to_ascii_lowercase();
+    let mac = norm(wifi_mac);
+    found.iter().find(|d| !mac.is_empty() && d.wifi_mac.as_deref().map(norm) == Some(mac.clone()) && d.ip != current.to_string())
+}
 
 /// Plage `192.168.1.1-254` ou `192.168.1.0/24` (préfixes 24 à 30, hors adresses réseau et broadcast).
 pub fn parse_range(s: &str) -> Result<Vec<Ipv4Addr>, ApiError> {
@@ -457,6 +539,82 @@ mod tests {
         });
         assert_eq!(client.call("Test", json!({})).unwrap(), json!(7));
         t.join().unwrap();
+    }
+
+    /// Serveur loopback qui ignore les `skip` premiers paquets puis répond `result: 7` à chacun des suivants.
+    fn flaky_server(skip: usize) -> (SocketAddr, std::thread::JoinHandle<Vec<Value>>) {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let addr = server.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let (mut seen, mut buf) = (Vec::new(), [0u8; 4096]);
+            while let Ok((n, from)) = server.recv_from(&mut buf) {
+                let req: Value = serde_json::from_slice(&buf[..n]).unwrap();
+                if seen.len() >= skip {
+                    server.send_to(&serde_json::to_vec(&json!({ "id": req["id"], "result": 7 })).unwrap(), from).unwrap();
+                }
+                seen.push(req);
+            }
+            seen
+        });
+        (addr, t)
+    }
+
+    fn quick(addr: SocketAddr) -> Client {
+        let mut c = Client::new(addr).unwrap();
+        c.waits = [Duration::from_millis(60); 3];
+        c
+    }
+
+    #[test]
+    fn call_retries_with_the_same_id_after_a_lost_packet() {
+        let (addr, server) = flaky_server(1);
+        let mut client = quick(addr);
+        assert_eq!(client.call("Test", json!({})).unwrap(), json!(7));
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["id"], seen[1]["id"]);
+        let link = client.link();
+        assert_eq!((link.ok, link.total), (1, 1));
+        assert!(link.rtt_ms.unwrap() < 60, "RTT mesuré sur la tentative réussie, pas depuis la première : {link:?}");
+    }
+
+    #[test]
+    fn call_gives_up_after_three_attempts() {
+        let (addr, server) = flaky_server(usize::MAX);
+        let mut client = quick(addr);
+        assert!(matches!(client.call("Test", json!({})), Err(ApiError::Timeout)));
+        assert_eq!(server.join().unwrap().len(), 3);
+        assert_eq!((client.link().ok, client.link().total, client.link().rtt_ms), (0, 1, None));
+    }
+
+    #[test]
+    fn link_keeps_the_last_twenty_requests_and_the_median_rtt() {
+        let ms = Duration::from_millis;
+        let outcomes: Vec<_> = [Some(ms(10)), None, Some(ms(300)), Some(ms(40))].into();
+        assert_eq!(Link::of(outcomes.iter()), Link { ok: 3, total: 4, rtt_ms: Some(40), rssi: None });
+        assert_eq!(Link::of([].iter()), Link::default());
+
+        let (addr, server) = flaky_server(0);
+        let mut client = quick(addr);
+        for _ in 0..25 {
+            client.call("Test", json!({})).unwrap();
+        }
+        assert_eq!(client.link().total, 20);
+        assert_eq!(server.join().unwrap().len(), 25);
+    }
+
+    #[test]
+    fn finds_the_same_battery_at_another_ip() {
+        let dev = |ip: &str, mac: Option<&str>| Device {
+            ip: ip.into(), port: 30000, name: None, version: None, wifi_mac: mac.map(Into::into),
+        };
+        let found = [dev("192.168.1.7", Some("AA:BB:CC:00:11:22")), dev("192.168.1.9", Some("aabbcc001122")), dev("192.168.1.8", None)];
+        let current: IpAddr = "192.168.1.7".parse().unwrap();
+        assert_eq!(find_moved(&found, "aabbcc001122", current).map(|d| d.ip.as_str()), Some("192.168.1.9"));
+        assert!(find_moved(&found[..1], "aabbcc001122", current).is_none(), "même IP : rien à changer");
+        assert!(find_moved(&found, "ffffffffffff", current).is_none());
+        assert!(find_moved(&found, "", current).is_none());
     }
 
     #[test]

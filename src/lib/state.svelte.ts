@@ -1,4 +1,4 @@
-import { connect, discover, onBusy, onControl, onLog, onSlotTest, onStatus, type Control, type Device, type Snapshot, type SlotTest } from "./api";
+import { connect, discover, onBusy, onConnected, onControl, onLog, onSlotTest, onStatus, type Control, type Device, type Snapshot, type SlotTest } from "./api";
 import { loadSettings, defaults, saveSetting, type Settings } from "./store";
 import { flows } from "./energy";
 
@@ -8,6 +8,8 @@ export const app = $state({
   tab: "devices" as "devices" | "status" | "modes" | "planning" | "history" | "device" | "settings",
   snapshot: undefined as Snapshot | undefined,
   busy: false,
+  /** Dernier message du backend pendant une écriture (nouvelle tentative, etc.). */
+  progress: "",
   control: undefined as Control | undefined,
   slotTest: undefined as SlotTest | undefined,
   connectedIp: null as string | null,
@@ -18,6 +20,9 @@ export const app = $state({
   historyRev: 0,
   ready: false,
 });
+
+/** Horloge de l'interface : l'âge des données avance même sans nouveau sondage. */
+export const clock = $state({ now: Date.now() });
 
 export const history: (number | null)[][] = [[], [], [], []];
 
@@ -50,10 +55,23 @@ export function setting<K extends keyof Settings>(key: K, value: Settings[K]) {
 export async function init() {
   await onStatus((s) => {
     app.snapshot = s;
-    pushHistory(s);
+    // Un sondage sans lecture fraîche ne doit pas allonger la courbe avec des valeurs périmées.
+    if ((["es", "em", "pv"] as const).some((k) => s.updated[k] === s.ts)) pushHistory(s);
   });
-  await onLog((l) => log(l));
-  await onBusy((b) => (app.busy = b));
+  await onLog((l) => {
+    log(l);
+    if (app.busy) app.progress = l;
+  });
+  await onBusy((b) => {
+    app.busy = b;
+    app.progress = "";
+  });
+  // Le backend a retrouvé la batterie à une autre IP (il a déjà écrit lastIp dans le store).
+  await onConnected((ip) => {
+    app.connectedIp = ip;
+    app.settings.lastIp = ip;
+  });
+  setInterval(() => (clock.now = Date.now()), 1000);
   await onControl((c) => (app.control = c));
   await onSlotTest((t) => (app.slotTest = t));
   try {

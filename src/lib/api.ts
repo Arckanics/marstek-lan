@@ -52,7 +52,16 @@ export type Pv = {
   pv3Power?: number; pv3Voltage?: number; pv3Current?: number;
   pv4Power?: number; pv4Voltage?: number; pv4Current?: number;
 };
-export type Snapshot = { ts: number; device?: DeviceInfo; wifi?: Wifi; ble?: Ble; bat?: Bat; es?: Es; mode?: Mode; em?: Em; pv?: Pv };
+export type Section = "device" | "wifi" | "ble" | "bat" | "es" | "mode" | "em" | "pv";
+/** ok réponses sur total pour les 20 dernières requêtes ; rttMs = médiane ; rssi = Wi-Fi vu par la batterie. */
+export type Link = { ok: number; total: number; rttMs?: number; rssi?: number };
+export type Snapshot = {
+  ts: number;
+  /** Date (ms) de la dernière lecture réussie de chaque section : une lecture ratée garde l'ancienne valeur. */
+  updated: Partial<Record<Section, number>>;
+  link: Link;
+  device?: DeviceInfo; wifi?: Wifi; ble?: Ble; bat?: Bat; es?: Es; mode?: Mode; em?: Em; pv?: Pv;
+};
 
 export const discover = (range?: string) => invoke<Device[]>("discover", { range });
 export const connect = (ip: string) => invoke<void>("connect", { ip });
@@ -78,4 +87,5 @@ export const onStatus = (fn: (s: Snapshot) => void): Promise<UnlistenFn> => list
 export const onLog = (fn: (line: string) => void): Promise<UnlistenFn> => listen<string>("log", (e) => fn(e.payload));
 export const onBusy = (fn: (busy: boolean) => void): Promise<UnlistenFn> => listen<boolean>("busy", (e) => fn(e.payload));
 export const onSlotTest = (fn: (t: SlotTest) => void): Promise<UnlistenFn> => listen<SlotTest>("slot_test", (e) => fn(e.payload));
+export const onConnected = (fn: (ip: string) => void): Promise<UnlistenFn> => listen<string>("connected", (e) => fn(e.payload));
 export const onControl = (fn: (c: Control) => void): Promise<UnlistenFn> => listen<Control>("control", (e) => fn(e.payload));

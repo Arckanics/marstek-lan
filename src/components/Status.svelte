@@ -5,6 +5,7 @@
   import FlowDiagram from "./FlowDiagram.svelte";
   import SocGauge from "./SocGauge.svelte";
   import Chart from "./Chart.svelte";
+  import Stale from "./Stale.svelte";
 
   const modeNames: Record<string, string> = { Auto: "Auto", AI: "IA", Manual: "Manuel", Passive: "Passif", UPS: "UPS" };
 
@@ -23,10 +24,12 @@
     <div class="top">
       <section class="card" aria-label="Flux d'énergie">
         <h3>Flux d'énergie</h3>
+        <Stale keys={["es", "em", "pv"]} />
         <FlowDiagram {f} />
       </section>
       <section class="card side" aria-label="Batterie">
         <h3>Batterie</h3>
+        <Stale keys={["bat", "mode"]} />
         <SocGauge {soc} bat={f.bat} />
         <dl>
           <dt>Mode</dt><dd>{s.mode?.mode ? (modeNames[s.mode.mode] ?? s.mode.mode) : "—"}</dd>
