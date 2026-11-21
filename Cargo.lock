@@ -2335,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "marstek-lan"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 dependencies = [
  "keyring",
  "md-5",
