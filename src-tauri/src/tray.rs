@@ -1,10 +1,12 @@
 //! Icône de zone de notification : pile dessinée à l'exécution, infobulle et menu.
 
 use crate::api::{CHARGE_SIGN, Direction, ModeReq};
+use crate::i18n::{self, Lang, Msg};
+use crate::settings::ModeKind;
 use crate::worker::{Worker, Write};
 use std::thread;
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
@@ -36,9 +38,9 @@ pub fn level(soc: Option<f64>) -> u8 {
     soc.map_or(0, |s| (s / 20.0).round().clamp(0.0, 5.0) as u8)
 }
 
-pub fn tooltip(online: bool, soc: Option<f64>, power: Option<f64>, mode: Option<&str>) -> String {
+pub fn tooltip(online: bool, soc: Option<f64>, power: Option<f64>, mode: Option<&str>, lang: Lang) -> String {
     if !online {
-        return "Marstek LAN : batterie injoignable".into();
+        return Msg::TrayOffline.text(lang);
     }
     let parts: Vec<String> = [soc.map(|s| format!("SOC {s:.0} %")), power.map(|p| format!("{p:+.0} W")), mode.map(str::to_owned)]
         .into_iter()
@@ -101,15 +103,23 @@ fn set_mode(app: &AppHandle, mode: ModeReq) {
     });
 }
 
-pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Ouvrir", true, None::<&str>)?;
-    let auto = MenuItem::with_id(app, "auto", "Auto", true, None::<&str>)?;
-    let ai = MenuItem::with_id(app, "ai", "IA", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "Arrêt", true, None::<&str>)?;
-    let suspend = CheckMenuItem::with_id(app, "suspend", "Suspendre les règles", true, false, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
+fn menu(app: &AppHandle, lang: Lang) -> tauri::Result<Menu<tauri::Wry>> {
+    let item = |id, msg: Msg| MenuItem::with_id(app, id, msg.text(lang), true, None::<&str>);
+    let (open, auto, ai) = (item("open", Msg::TrayOpen)?, item("auto", Msg::Mode(ModeKind::Auto))?, item("ai", Msg::Mode(ModeKind::Ai))?);
+    let (stop, quit) = (item("stop", Msg::TrayStop)?, item("quit", Msg::TrayQuit)?);
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &sep, &auto, &ai, &stop, &suspend, &sep, &quit])?;
+    Menu::with_items(app, &[&open, &sep, &auto, &ai, &stop, &sep, &quit])
+}
+
+/// Le menu change de langue avec le réglage ; l'infobulle suit par `update`.
+pub fn set_lang(app: &AppHandle, lang: Lang) {
+    if let (Some(tray), Ok(menu)) = (app.tray_by_id(ID), menu(app, lang)) {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    let menu = menu(app, i18n::lang())?;
 
     TrayIconBuilder::with_id(ID)
         .icon(Image::new_owned(icon_rgba(0, Flow::Offline), SIZE, SIZE))
@@ -121,9 +131,6 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             "auto" => set_mode(app, ModeReq::Auto),
             "ai" => set_mode(app, ModeReq::Ai),
             "stop" => set_mode(app, ModeReq::Passive { direction: Direction::Charge, power: 0, seconds: 3600 }),
-            "suspend" => {
-                let _ = app.state::<Worker>().suspend(suspend.is_checked().unwrap_or(false));
-            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -195,9 +202,11 @@ mod tests {
 
     #[test]
     fn tooltip_lists_what_is_known() {
-        assert_eq!(tooltip(true, Some(76.0), Some(420.0), Some("Auto")), "SOC 76 % · +420 W · Auto");
-        assert_eq!(tooltip(true, Some(76.0), None, None), "SOC 76 %");
-        assert_eq!(tooltip(true, None, None, None), "Marstek LAN");
-        assert_eq!(tooltip(false, Some(76.0), None, None), "Marstek LAN : batterie injoignable");
+        let tip = |online, soc, power, mode| tooltip(online, soc, power, mode, Lang::Fr);
+        assert_eq!(tip(true, Some(76.0), Some(420.0), Some("Auto")), "SOC 76 % · +420 W · Auto");
+        assert_eq!(tip(true, Some(76.0), None, None), "SOC 76 %");
+        assert_eq!(tip(true, None, None, None), "Marstek LAN");
+        assert_eq!(tip(false, Some(76.0), None, None), "Marstek LAN : batterie injoignable");
+        assert_eq!(tooltip(false, None, None, None, Lang::De), "Marstek LAN: Batterie nicht erreichbar");
     }
 }

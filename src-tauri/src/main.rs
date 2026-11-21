@@ -5,31 +5,52 @@ mod clock;
 mod cloud;
 mod control;
 mod history;
+mod i18n;
+mod journal;
+mod mqtt;
 mod plan;
 mod settings;
+mod topic_id;
 mod tray;
 mod worker;
 
-use api::{DEFAULT_PORT, Device, ModeReq, Slot};
-use history::{Bucket, EnergyRow, History, PowerSeries};
+use api::{ModeReq, Scan, Slot};
+use i18n::Msg;
+use history::{AverageDay, Bucket, Column, EnergyRow, History, PowerSeries, Price, Savings, SocStat};
 use plan::{Block, Plan, Tariff};
 use std::net::{Ipv4Addr, SocketAddr};
-use tauri::{Manager, RunEvent, State, WindowEvent};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use worker::{Worker, Write};
 
 type Res<T> = Result<T, String>;
 
+struct ScanCancel(AtomicBool);
+
 // `async` : sans lui, la commande bloquerait le thread de l'interface.
 #[tauri::command(async)]
-fn discover(range: Option<String>) -> Res<Vec<Device>> {
-    api::discover(range.as_deref(), DEFAULT_PORT).map_err(|e| e.to_string())
+fn discover(range: Option<String>, ports: String, auto: bool, cancel: State<ScanCancel>, app: tauri::AppHandle) -> Res<Scan> {
+    cancel.0.store(false, Ordering::Relaxed);
+    let scan = api::discover(range.as_deref(), &ports, auto, &cancel.0, &mut |p| {
+        let _ = app.emit("scan", p);
+    })
+    .map_err(|e| e.to_string())?;
+    if let Some(saved) = &scan.saved_ports {
+        settings::save_ports(&app, saved)?;
+    }
+    Ok(scan)
 }
 
 #[tauri::command]
-fn connect(ip: String, worker: State<Worker>) -> Res<()> {
-    let ip: Ipv4Addr = ip.trim().parse().map_err(|_| format!("adresse IP invalide : {ip}"))?;
-    worker.connect(SocketAddr::new(ip.into(), DEFAULT_PORT))
+fn cancel_scan(cancel: State<ScanCancel>) {
+    cancel.0.store(true, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn connect(ip: String, port: u16, worker: State<Worker>) -> Res<()> {
+    let ip: Ipv4Addr = ip.trim().parse().map_err(|_| Msg::BadIp(ip).to_string())?;
+    worker.connect(SocketAddr::new(ip.into(), port))
 }
 
 #[tauri::command]
@@ -83,6 +104,38 @@ fn run_slot_test(worker: State<Worker>) -> Res<()> {
     worker.slot_test()
 }
 
+// `async` : ces commandes attendent le réseau (jusqu'à 20 s) et ne doivent pas bloquer l'interface.
+#[tauri::command(async)]
+fn cloud_login(email: String, password: String, region: cloud::Region) -> Res<()> {
+    cloud::login(&email, &password, region).map_err(|m| m.to_string())
+}
+
+#[tauri::command(async)]
+fn cloud_devices() -> Res<Vec<cloud::CloudDevice>> {
+    cloud::devices().map_err(|m| m.to_string())
+}
+
+#[tauri::command(async)]
+fn cloud_logout() -> Res<()> {
+    cloud::logout().map_err(|m| m.to_string())
+}
+
+#[tauri::command(async)]
+fn cloud_status() -> Res<Option<cloud::Status>> {
+    cloud::status().map_err(|m| m.to_string())
+}
+
+// `async` : attend le réseau (HTTPS puis une connexion MQTT) et ne doit pas bloquer l'interface.
+#[tauri::command(async)]
+fn cloud_enable_local_api(devid: String) -> Res<()> {
+    cloud::enable_local_api(&devid).map_err(|m| m.to_string())
+}
+
+#[tauri::command(async)]
+fn cloud_reselect_ct(devid: String, meter: u8, mac: Option<String>) -> Res<String> {
+    cloud::reselect_ct(&devid, meter, mac.as_deref()).map_err(|m| m.to_string())
+}
+
 #[tauri::command(async)]
 fn history_power(from: i64, to: i64, history: State<History>) -> Res<PowerSeries> {
     history.power(from, to).map_err(|e| e.to_string())
@@ -94,34 +147,30 @@ fn history_energy(from: i64, to: i64, bucket: Bucket, history: State<History>) -
 }
 
 #[tauri::command(async)]
+fn history_soc(from: i64, to: i64, profile: bool, history: State<History>) -> Res<Vec<SocStat>> {
+    let offset = clock::local_offset_ms();
+    (if profile { history.soc_profile(from, to, offset) } else { history.soc_daily(from, to, offset) }).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn history_average(column: Column, days: i64, weekend: Option<bool>, history: State<History>) -> Res<AverageDay> {
+    history.average_day(column, days, weekend, 15, clock::now_ms(), clock::local_offset_ms()).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn history_savings(from: i64, to: i64, price: Price, history: State<History>) -> Res<Savings> {
+    history.savings(from, to, &price, clock::local_offset_ms()).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
 fn export_csv(from: i64, to: i64, history: State<History>, app: tauri::AppHandle) -> Res<String> {
     let offset = clock::local_offset_ms();
     let csv = history::csv(&history.power(from, to).map_err(|e| e.to_string())?, offset);
     let day = |ms| clock::format_local(ms, offset)[..10].to_owned();
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
     let path = dir.join(format!("marstek-{}_{}.csv", day(from), day(to)));
-    std::fs::write(&path, csv).map_err(|e| format!("écriture impossible : {e}"))?;
+    std::fs::write(&path, csv).map_err(|e| Msg::CsvWrite(e.to_string()).to_string())?;
     Ok(path.to_string_lossy().into_owned())
-}
-
-#[tauri::command(async)]
-fn cloud_login(email: String, password: String, region: cloud::Region) -> Res<()> {
-    cloud::login(&email, &password, region)
-}
-
-#[tauri::command(async)]
-fn cloud_devices() -> Res<Vec<cloud::CloudDevice>> {
-    cloud::devices()
-}
-
-#[tauri::command(async)]
-fn cloud_logout() -> Res<()> {
-    cloud::logout()
-}
-
-#[tauri::command(async)]
-fn cloud_status() -> Res<Option<cloud::Status>> {
-    cloud::status()
 }
 
 fn main() {
@@ -146,9 +195,12 @@ fn main() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
-            // shortcut: base illisible = historique en mémoire pour la session (perdu à la fermeture), sans message.
-            let history = History::open(&dir.join("history.db")).or_else(|_| History::memory())?;
+            let history = History::open_or_recover(&dir.join("history.db"));
             app.manage(history);
+            // Avant le worker et l'icône : leurs premiers textes sont déjà dans la langue choisie.
+            i18n::set(settings::load(app.handle()).lang);
+            journal::setup(app.handle(), &dir);
+            app.manage(ScanCancel(AtomicBool::new(false)));
             app.manage(Worker::spawn(app.handle().clone()));
             tray::setup(app.handle())?;
             // La fenêtre est créée cachée (tauri.conf.json) : seul un démarrage sans `--hidden` l'affiche.
@@ -161,6 +213,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             discover,
+            cancel_scan,
             connect,
             refresh,
             set_mode,
@@ -172,21 +225,20 @@ fn main() {
             set_led,
             set_ble,
             run_slot_test,
-            history_power,
-            history_energy,
-            export_csv,
             cloud_login,
             cloud_devices,
             cloud_logout,
-            cloud_status
+            cloud_status,
+            cloud_enable_local_api,
+            cloud_reselect_ct,
+            history_power,
+            history_energy,
+            history_soc,
+            history_average,
+            history_savings,
+            export_csv
         ])
         .build(tauri::generate_context!())
         .expect("erreur au lancement de l'application")
-        .run(|app, event| {
-            // Fermeture par « Quitter » ou arrêt de Windows (tao émet `Exit` sur WM_ENDSESSION) : sans cela, un mode
-            // imposé par l'application resterait sur la batterie. Idempotent : le second appel ne trouve plus rien à rendre.
-            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-                app.state::<Worker>().shutdown();
-            }
-        });
+        .run(|_, _| {});
 }

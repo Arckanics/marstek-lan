@@ -1,4 +1,5 @@
-import type { PowerSeries, Snapshot } from "./api";
+import type { CloudReading, PowerSeries, Snapshot } from "./api";
+import { locale, t } from "./i18n.svelte";
 
 // shortcut: signes non documentés (charge = négatif, réseau > 0 = soutirage), à valider sur l'appareil.
 export const CHARGE_SIGN = -1;
@@ -27,6 +28,9 @@ export const withHouse = (p: PowerSeries): PowerSeries => ({
   load: p.load.map((l, i) => l || deduceHouse(p.pv[i], p.grid[i], p.bat[i] == null ? null : p.bat[i]! * CHARGE_SIGN)),
 });
 
+/** Nom d'une période en jours : 0 = aujourd'hui. */
+export const periodName = (days: number) => (days === 0 ? t("period.today") : days === 365 ? t("period.1y") : t("period.days", { n: days }));
+
 /** Puissances en W : batterie > 0 = charge, réseau > 0 = soutirage. */
 export function flows(s: Snapshot | undefined): Flows {
   if (!s) return { pv: null, grid: null, bat: null, house: null, houseDeduced: false };
@@ -39,5 +43,14 @@ export function flows(s: Snapshot | undefined): Flows {
   return { pv, grid, bat, house, houseDeduced: house != null };
 }
 
-export const fmtW = (w: number | null | undefined) => (w == null ? "—" : `${Math.round(w).toLocaleString("fr-FR")} W`);
-export const fmtKwh = (v: number | undefined, divisor: number) => (v == null ? "—" : `${(v / divisor).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} kWh`);
+/** Puissances du cloud, mêmes conventions que `flows` ; le réseau n'y figure pas. */
+export const cloudFlows = (c: CloudReading): Flows => ({
+  pv: c.pvW,
+  grid: null,
+  bat: c.chargeW == null && c.dischargeW == null ? null : (c.chargeW ?? 0) - (c.dischargeW ?? 0),
+  house: c.loadW,
+  houseDeduced: false,
+});
+
+export const fmtW = (w: number | null | undefined) => (w == null ? "—" : `${Math.round(w).toLocaleString(locale())} W`);
+export const fmtKwh = (v: number | undefined, divisor: number) => (v == null ? "—" : `${(v / divisor).toLocaleString(locale(), { maximumFractionDigits: 2 })} kWh`);

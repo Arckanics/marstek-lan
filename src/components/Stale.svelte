@@ -1,12 +1,13 @@
 <script lang="ts">
   import { app, clock } from "../lib/state.svelte";
-  import { ageOf, fmtAge, STALE_S } from "../lib/link";
+  import { t } from "../lib/i18n.svelte";
+  import { ageOf, fmtAge, staleAfter } from "../lib/link";
   import type { Section } from "../lib/api";
 
   let { keys }: { keys: Section[] } = $props();
   const age = $derived(app.snapshot ? ageOf(app.snapshot, keys, clock.now) : undefined);
 </script>
 
-{#if age != null && age > STALE_S}
-  <span class="badge" role="status"><span class="dot poor"></span>Données d'il y a {fmtAge(age)}</span>
+{#if age != null && app.snapshot && age > staleAfter(app.snapshot)}
+  <span class="badge tone k-warn" role="status">{t("stale.badge", { age: fmtAge(age) })}</span>
 {/if}
