@@ -6,7 +6,9 @@ use crate::api::{
     ModeReq, PvStatus, Slot, WifiStatus, manual_slots,
 };
 use crate::clock::{self, MINUTE};
-use crate::control::{self, Action, Control, Engine, OFFLINE_AFTER, Point, Side, SlotTest, Source};
+use crate::control::{
+    self, Action, Control, Drive, Engine, Hybrid, HybridAction, OFFLINE_AFTER, Point, Side, SlotTest, Source, Verdict,
+};
 use crate::history::{Counters, History, Sample};
 use crate::plan::{Plan, compile_plan};
 use crate::settings::{self, Notify, Rules};
@@ -25,6 +27,8 @@ use tauri_plugin_notification::NotificationExt;
 const PAUSE: Duration = Duration::from_millis(250);
 const POLL: Duration = Duration::from_secs(10);
 const POLL_MAX: Duration = Duration::from_secs(60);
+/// Temps laissé à l'écriture du plan à la fermeture de l'application ; au-delà, on quitte quand même.
+const EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Hors ligne, le sondage s'espace (10, 20, 40, 60 s) pour ne pas enchaîner les timeouts ; un succès le ramène à 10 s.
 fn poll_interval(failures: u32) -> Duration {
@@ -70,6 +74,7 @@ enum Cmd {
     Suspend(bool),
     SlotTest(Sender<Result<(), String>>),
     Write(Write, Sender<Result<Vec<bool>, String>>),
+    Exit(Sender<()>),
 }
 
 pub struct Worker(Sender<Cmd>);
@@ -98,6 +103,10 @@ impl Worker {
                     Ok(Cmd::Write(w, reply)) => {
                         let r = state.write(w);
                         let _ = reply.send(r);
+                    }
+                    Ok(Cmd::Exit(reply)) => {
+                        state.restore_plan();
+                        let _ = reply.send(());
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         state.poll(false);
@@ -130,6 +139,14 @@ impl Worker {
 
     pub fn suspend(&self, on: bool) -> Result<(), String> {
         self.send(Cmd::Suspend(on))
+    }
+
+    /// À la fermeture de l'application : si elle a mis la batterie hors du plan Manual, lui renvoie le plan.
+    pub fn shutdown(&self) {
+        let (tx, rx) = channel();
+        if self.send(Cmd::Exit(tx)).is_ok() {
+            let _ = rx.recv_timeout(EXIT_WAIT);
+        }
     }
 
     /// Bloque jusqu'à l'écriture du créneau de test ; la suite se suit par l'événement `slot_test`.
@@ -196,6 +213,8 @@ struct State {
     rules: Rules,
     notify: Notify,
     plan: Option<Plan>,
+    /// Résultat du test hors créneaux ; `Follows` fait des blocs auto, IA et UPS de simples trous.
+    outside: Option<Verdict>,
     engine: Engine,
     manual_label: String,
     control: Option<Control>,
@@ -264,6 +283,7 @@ impl State {
             rules: Rules::default(),
             notify: Notify::default(),
             plan: None,
+            outside: None,
             engine: Engine::default(),
             manual_label: String::new(),
             control: None,
@@ -293,6 +313,7 @@ impl State {
     fn reload(&mut self) {
         let s = settings::load(&self.app);
         self.plan = s.sent_plan;
+        self.outside = s.outside_slots.map(|o| o.verdict);
         self.rules = s.rules;
         self.notify = s.notify;
         self.emit_control();
@@ -432,9 +453,17 @@ impl State {
                 Control { source: Source::Rule, detail: format!("{name} : {}", rule.mode.label()) }
             }
             (None, Some(_)) => Control { source: Source::Manual, detail: self.manual_label.clone() },
-            (None, None) => Control {
-                source: Source::Plan,
-                detail: self.plan.as_ref().map_or_else(|| "aucun plan actif".to_owned(), |p| p.name.clone()),
+            (None, None) => match self.engine.hybrid {
+                Some(Hybrid { drive: Drive::Mode(mode), .. }) => {
+                    Control { source: Source::Hybrid, detail: format!("bloc {}", mode.label()) }
+                }
+                Some(Hybrid { drive: Drive::Hold, .. }) => {
+                    Control { source: Source::Hybrid, detail: "limite de SOC atteinte, maintien".into() }
+                }
+                None => Control {
+                    source: Source::Plan,
+                    detail: self.plan.as_ref().map_or_else(|| "aucun plan actif".to_owned(), |p| p.name.clone()),
+                },
             },
         };
         if self.control.as_ref() != Some(&c) {
@@ -457,7 +486,7 @@ impl State {
         if self.test.is_some() {
             return self.test_step(now);
         }
-        let (next, action) = control::decide(&self.rules, self.engine, self.soc(), now);
+        let (mut next, action) = control::decide(&self.rules, self.engine, self.soc(), now);
         let done = match action {
             Action::None => true,
             Action::Rule(side) => self.apply_rule(side),
@@ -465,9 +494,60 @@ impl State {
         };
         // Un échec garde l'ancien état : la même décision est retentée au prochain sondage.
         if done {
+            if action != Action::None {
+                // La règle ou le plan vient de réécrire la batterie : le pilotage hybride est à recalculer.
+                next.hybrid = None;
+            }
             self.engine = next;
+            // Règles SOC et action manuelle passent avant le pilotage hybride.
+            if action == Action::None && next.latch.is_none() && next.manual_until.is_none() {
+                self.hybrid_tick(now);
+            }
         }
         self.emit_control();
+    }
+
+    fn hybrid_tick(&mut self, now: i64) {
+        let week = clock::week_minute(now, clock::local_offset_ms());
+        let holding = matches!(self.engine.hybrid, Some(Hybrid { drive: Drive::Hold, .. }));
+        let wanted = control::hybrid_wanted(self.plan.as_ref(), self.outside, self.soc(), now, week, holding);
+        let (done, next) = match control::hybrid_step(self.engine.hybrid, wanted) {
+            HybridAction::None => return,
+            HybridAction::Apply(h) => (self.apply_hybrid(h, now), Some(h)),
+            HybridAction::HandBack => (self.hand_back(), None),
+        };
+        if done {
+            self.engine.hybrid = next;
+        }
+    }
+
+    fn apply_hybrid(&mut self, h: Hybrid, now: i64) -> bool {
+        let (req, what) = match h.drive {
+            Drive::Mode(mode) => (mode.req(), format!("bloc {}", mode.label())),
+            Drive::Hold => {
+                let seconds = control::hold_seconds(h.until, now);
+                (ModeReq::Passive { direction: Direction::Charge, power: 0, seconds }, "limite de SOC atteinte".into())
+            }
+        };
+        let r = self.exec(Write::Mode(req));
+        let ok = self.settle(&r);
+        if ok {
+            self.mode_changed(format!("Pilotage par l'application : {what}"));
+        }
+        ok
+    }
+
+    /// Fermeture de l'application : sans elle, un mode imposé (règle, action manuelle, bloc hybride, test)
+    /// resterait en place. Le plan Manual est renvoyé, puis plus aucune requête ne part.
+    fn restore_plan(&mut self) {
+        if !self.online || !control::off_plan(&self.engine, self.test.is_some()) {
+            return;
+        }
+        let slots = self.plan.as_ref().and_then(|p| compile_plan(&p.blocks).ok());
+        if let (Some(slots), Some(c)) = (slots, self.client.as_mut()) {
+            let _ = run(c, Write::Slots(slots), &|_| ());
+        }
+        self.client = None;
     }
 
     fn alerts(&mut self) {
@@ -553,6 +633,7 @@ impl State {
                         None => control::manual_until(self.plan.as_ref(), now, week),
                     });
                     self.engine.latch = None;
+                    self.engine.hybrid = None;
                     self.manual_label = label;
                 }
                 After::Plan(plan) => {
@@ -562,6 +643,7 @@ impl State {
                     self.plan = Some(plan);
                     self.engine.manual_until = None;
                     self.engine.latch = None;
+                    self.engine.hybrid = None;
                 }
                 After::Nothing => {}
             }
@@ -632,6 +714,7 @@ impl State {
         self.settle(&r);
         match verdict {
             Some(v) => {
+                self.outside = Some(v);
                 if let Err(e) = settings::save_outside_slots(&self.app, json!({ "verdict": v, "ts": now })) {
                     self.log(format!("Résultat du test non enregistré : {e}"));
                 }

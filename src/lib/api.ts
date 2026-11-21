@@ -9,9 +9,17 @@ export type ModeReq =
   | { kind: "ups" }
   | { kind: "passive"; direction: Direction; power: number; seconds: number };
 export type Slot = { start: string; end: string; days: number; direction: Direction; power: number; enabled: boolean };
-export type Tariff = { offpeak: { start: string; end: string }[]; chargePower: number; dischargePower: number; days: number };
+export type Tariff = {
+  offpeak: { start: string; end: string }[]; chargePower: number; dischargePower: number; days: number;
+  /** SOC visé en heures creuses ; 100 = pas de limite. */
+  chargeSoc: number;
+  /** Heures pleines : bloc auto, ou décharge à `dischargePower`. */
+  peak: "auto" | "discharge";
+};
 
-export type Block = { day: number; start: string; end: string; direction: Direction; power: number };
+export type BlockKind = "charge" | "discharge" | "auto" | "ai" | "ups";
+/** charge/discharge : créneau Manuel de `power` W ; auto/ai/ups : `power` vaut 0. `socLimit` : cible de SOC (charge) ou plancher (décharge). */
+export type Block = { day: number; start: string; end: string; kind: BlockKind; power: number; socLimit?: number };
 export type Plan = { name: string; blocks: Block[] };
 export type ModeKind = "auto" | "ai" | "ups";
 export type Rule = { enabled: boolean; soc: number; mode: ModeKind };
@@ -26,7 +34,7 @@ export type CloudDevice = {
   capacityKwh: number | null; status: string | null;
 };
 export type SlotTest = { samples: { ts: number; batPower: number | null }[]; verdict: "idle" | "follows" | null };
-export type Control = { source: "plan" | "rule" | "manual"; detail: string };
+export type Control = { source: "plan" | "rule" | "manual" | "hybrid"; detail: string };
 
 export type DeviceInfo = { device?: string; ver?: string | number; bleMac?: string; wifiMac?: string; wifiName?: string; ip?: string };
 export type Wifi = { ssid?: string; rssi?: number; staIp?: string; wifiMac?: string };

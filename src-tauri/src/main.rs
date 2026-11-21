@@ -14,7 +14,7 @@ use api::{DEFAULT_PORT, Device, ModeReq, Slot};
 use history::{Bucket, EnergyRow, History, PowerSeries};
 use plan::{Block, Plan, Tariff};
 use std::net::{Ipv4Addr, SocketAddr};
-use tauri::{Manager, State, WindowEvent};
+use tauri::{Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use worker::{Worker, Write};
 
@@ -180,6 +180,13 @@ fn main() {
             cloud_logout,
             cloud_status
         ])
-        .run(tauri::generate_context!())
-        .expect("erreur au lancement de l'application");
+        .build(tauri::generate_context!())
+        .expect("erreur au lancement de l'application")
+        .run(|app, event| {
+            // Fermeture par « Quitter » ou arrêt de Windows (tao émet `Exit` sur WM_ENDSESSION) : sans cela, un mode
+            // imposé par l'application resterait sur la batterie. Idempotent : le second appel ne trouve plus rien à rendre.
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                app.state::<Worker>().shutdown();
+            }
+        });
 }

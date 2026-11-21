@@ -1,12 +1,12 @@
 <script lang="ts">
-  import type { Block, Direction } from "../lib/api";
-  import { STEPS, dayNames, fromCells, slotTime, toCells, type Cell } from "../lib/plan";
+  import type { Block } from "../lib/api";
+  import { STEPS, dayNames, describeCell, fromCells, isManual, slotTime, toCells, type Cell } from "../lib/plan";
 
-  type Tool = Direction | "erase";
-  let { blocks, tool, power, onchange }: { blocks: Block[]; tool: Tool; power: number; onchange: (b: Block[]) => void } = $props();
+  /** `paint` : ce que la souris pose (null = effacer). `piloted` : les blocs Auto, IA et UPS demandent l'application. */
+  let { blocks, paint, piloted, onchange }: { blocks: Block[]; paint: Cell; piloted: boolean; onchange: (b: Block[]) => void } = $props();
 
   const cells = $derived(toCells(blocks));
-  const paint: Cell = $derived(tool === "erase" ? null : { direction: tool, power });
+  const letters = { auto: "A", ai: "IA", ups: "UPS" } as const;
 
   let drag = $state<{ day: number; a: number; b: number }>();
   let cursor = $state({ day: 0, slot: 0 });
@@ -61,7 +61,7 @@
 
   const describe = (d: number, i: number) => {
     const c = cells[d][i];
-    return `${dayNames[d]} ${slotTime(i)} : ${c ? `${c.direction === "charge" ? "charge" : "décharge"} ${c.power} W` : "vide"}`;
+    return `${dayNames[d]} ${slotTime(i)} : ${describeCell(c)}${c && !isManual(c.kind) && piloted ? " (PC allumé requis)" : ""}`;
   };
   const status = $derived(`${describe(cursor.day, cursor.slot)}${anchor != null ? `. Début de sélection à ${slotTime(anchor)}` : ""}`);
 </script>
@@ -86,8 +86,10 @@
         {@const c = view(d, i)}
         <div
           class="cell"
-          class:charge={c?.direction === "charge"}
-          class:discharge={c?.direction === "discharge"}
+          class:charge={c?.kind === "charge"}
+          class:discharge={c?.kind === "discharge"}
+          class:mode={c && !isManual(c.kind)}
+          class:piloted={c && !isManual(c.kind) && piloted}
           class:hour={i % 4 === 0}
           class:cur={cursor.day === d && cursor.slot === i}
           class:anchor={d === cursor.day && i === anchor}
@@ -95,6 +97,7 @@
           role="presentation"
           onpointerdown={(e) => down(e, d, i)}
           onpointerenter={() => over(d, i)}>
+          {#if c && c.kind in letters && view(d, i - 1)?.kind !== c.kind}{letters[c.kind as keyof typeof letters]}{/if}
         </div>
       {/each}
     </div>
@@ -115,6 +118,8 @@
   .cell.hour { border-top-color: var(--border); }
   .cell.charge { background: var(--charge); }
   .cell.discharge { background: repeating-linear-gradient(135deg, var(--discharge) 0 4px, transparent 4px 6px), var(--surface-2); }
+  .cell.mode { background: color-mix(in srgb, var(--grid) 28%, var(--surface-2)); font-size: 0.6rem; line-height: 11px; font-weight: 700; color: var(--text); overflow: hidden; white-space: nowrap; }
+  .cell.piloted { background: repeating-linear-gradient(90deg, var(--grid) 0 3px, transparent 3px 6px), var(--surface-2); }
   .cell.cur { outline: 2px solid var(--focus); outline-offset: -2px; position: relative; }
   .cell.anchor { box-shadow: inset 0 0 0 2px var(--text); }
   .grid:not(:focus-visible) .cell.cur { outline: 0; }

@@ -18,7 +18,7 @@
   let rules = $state(clone(app.settings.rules));
   const saveRules = () => setting("rules", clone(rules));
   const ruleModes: [ModeKind, string][] = [["auto", "Auto"], ["ai", "IA"], ["ups", "UPS"]];
-  const sources = { plan: "Plan", rule: "Règle SOC", manual: "Action manuelle" };
+  const sources = { plan: "Plan", rule: "Règle SOC", manual: "Action manuelle", hybrid: "Pilotage hybride" };
   const overlap = $derived(rules.low.enabled && rules.high.enabled && rules.low.soc >= rules.high.soc);
 
   const apply = (label: string, req: ModeReq) => write(label, () => setMode(req));

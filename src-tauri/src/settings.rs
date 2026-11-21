@@ -1,6 +1,7 @@
 //! Réglages écrits par le front dans `settings.json` (plugin-store) ; le backend les relit ici.
 
 use crate::api::ModeReq;
+use crate::control::Verdict;
 use crate::plan::Plan;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -79,12 +80,19 @@ impl Default for Notify {
     }
 }
 
+/// Résultat du test hors créneaux ; la date ne sert qu'à l'interface.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutsideSlots {
+    pub verdict: Verdict,
+}
+
 #[derive(Debug, Default)]
 pub struct Settings {
     pub sent_plan: Option<Plan>,
     pub rules: Rules,
     pub notify: Notify,
     pub scan_range: Option<String>,
+    pub outside_slots: Option<OutsideSlots>,
 }
 
 fn read<T: DeserializeOwned + Default>(store: &Store<tauri::Wry>, key: &str) -> T {
@@ -99,6 +107,7 @@ pub fn load(app: &AppHandle) -> Settings {
         rules: read(&store, "rules"),
         notify: read(&store, "notify"),
         scan_range: read(&store, "scanRange"),
+        outside_slots: read(&store, "outsideSlots"),
     }
 }
 

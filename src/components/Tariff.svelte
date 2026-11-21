@@ -28,7 +28,7 @@
 
 <section class="card" aria-label="Générateur tarif">
   <h3>Générateur tarif</h3>
-  <p class="muted intro">Remplit la grille du modèle sélectionné : charge pendant les heures creuses, décharge le reste du temps. Le contenu actuel de la grille est remplacé.</p>
+  <p class="muted intro">Remplit la grille du modèle sélectionné : charge pendant les heures creuses jusqu'au SOC visé, puis un bloc Auto ou une décharge le reste du temps. Le contenu actuel de la grille est remplacé. Un bloc Auto demande le PC allumé, sauf si le test hors créneaux a montré que la batterie suit déjà la consommation.</p>
 
   <ul class="ranges">
     {#each t.offpeak as r, i}
@@ -45,7 +45,16 @@
 
   <div class="row opts">
     <label class="field">Puissance de charge (W)<input type="number" min="0" step="50" bind:value={t.chargePower} /></label>
-    <label class="field">Puissance de décharge (W)<input type="number" min="0" step="50" bind:value={t.dischargePower} /></label>
+    <label class="field">SOC visé en heures creuses (%)<input type="number" min="1" max="100" step="1" bind:value={t.chargeSoc} /></label>
+    <label class="field">Heures pleines
+      <select bind:value={t.peak}>
+        <option value="auto">Auto</option>
+        <option value="discharge">Décharge</option>
+      </select>
+    </label>
+    {#if t.peak === "discharge"}
+      <label class="field">Puissance de décharge (W)<input type="number" min="0" step="50" bind:value={t.dischargePower} /></label>
+    {/if}
     <div class="field">Jours<Days bind:days={t.days} /></div>
   </div>
 

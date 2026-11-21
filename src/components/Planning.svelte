@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { applyPlan, compilePlan, type Block, type Direction, type Slot } from "../lib/api";
+  import { applyPlan, compilePlan, type Block, type BlockKind, type Slot } from "../lib/api";
   import { app, errText, setting, write } from "../lib/state.svelte";
   import { clone } from "../lib/store";
-  import { dayNames } from "../lib/plan";
+  import { dayNames, isManual, type Cell } from "../lib/plan";
   import Confirm from "./Confirm.svelte";
   import Days from "./Days.svelte";
   import PlanGrid from "./PlanGrid.svelte";
@@ -17,13 +17,25 @@
   const plan = $derived(plans[Math.min(sel, plans.length - 1)]);
   const off = $derived(!app.connectedIp || app.busy);
 
-  let tool = $state<Direction | "erase">("charge");
+  let tool = $state<BlockKind | "erase">("charge");
   let power = $state(800);
+  /** Cible (charge) ou plancher (décharge) de SOC ; vide = pas de limite. */
+  let limit = $state<number | null>(null);
   let from = $state(0);
   let targets = $state(0);
 
   let count = $state<number>();
   let error = $state("");
+
+  const manual = $derived(tool !== "erase" && isManual(tool));
+  const paint: Cell = $derived(
+    tool === "erase" ? null : manual ? { kind: tool, power, ...(limit != null && { socLimit: Math.round(limit) }) } : { kind: tool, power: 0 },
+  );
+  // Sans test concluant (« idle » ou pas de test), la batterie reste au repos hors créneaux : l'application doit piloter les blocs Auto, IA, UPS.
+  const piloted = $derived(app.settings.outsideSlots?.verdict !== "follows");
+  const hasModes = $derived(!!plan?.blocks.some((b) => !isManual(b.kind)));
+  const hasLimits = $derived(!!plan?.blocks.some((b) => b.socLimit != null));
+  const needsApp = $derived((hasModes && piloted) || hasLimits);
 
   const save = (next: typeof plans) => setting("plans", next);
   const uniqueName = (base: string) => {
@@ -90,7 +102,7 @@
       return;
     }
     const lines = slots.map(slotLine).join("\n") || "Aucun créneau : tous les créneaux seront désactivés.";
-    if (!(await confirm.ask(`Le plan « ${plan.name} » sera écrit (${slots.length}/${MAX} créneaux) et l'appareil passera en mode Manuel.\n${lines}`))) return;
+    if (!(await confirm.ask(`Le plan « ${plan.name} » sera écrit (${slots.length}/${MAX} créneaux) et l'appareil passera en mode Manuel.\n${lines}${needsApp ? "\n\nPC allumé requis pour les blocs pilotés par l'application (Auto, IA, UPS, limites de SOC)." : ""}`))) return;
     const r = await write(`Envoi du plan « ${plan.name} »`, () => applyPlan(clone(plan)), (r) => r.every(Boolean));
     if (r?.every(Boolean)) app.settings.sentPlan = clone(plan);
   }
@@ -126,12 +138,31 @@
         <div class="seg" role="group" aria-label="Outil">
           <button aria-pressed={tool === "charge"} onclick={() => (tool = "charge")}>Charge</button>
           <button aria-pressed={tool === "discharge"} onclick={() => (tool = "discharge")}>Décharge</button>
+          <button aria-pressed={tool === "auto"} onclick={() => (tool = "auto")}>Auto</button>
+          <button aria-pressed={tool === "ai"} onclick={() => (tool = "ai")}>IA</button>
+          <button aria-pressed={tool === "ups"} onclick={() => (tool = "ups")}>UPS</button>
           <button aria-pressed={tool === "erase"} onclick={() => (tool = "erase")}>Effacer</button>
         </div>
-        <label class="field">Puissance (W)<input type="number" min="0" step="50" bind:value={power} disabled={tool === "erase"} /></label>
-        <span class="legend"><i class="sw charge"></i>Charge<i class="sw discharge"></i>Décharge</span>
+        <label class="field">Puissance (W)<input type="number" min="0" step="50" bind:value={power} disabled={!manual} /></label>
+        <label class="field">{tool === "discharge" ? "Plancher de SOC (%)" : "Cible de SOC (%)"}<input type="number" min="0" max="100" step="1" placeholder="aucune" bind:value={limit} disabled={!manual} /></label>
+        <span class="legend">
+          <i class="sw charge"></i>Charge<i class="sw discharge"></i>Décharge
+          <i class="sw mode" class:piloted></i>{piloted ? "Auto, IA, UPS : PC allumé requis" : "Auto, IA, UPS : sans pilotage"}
+        </span>
       </div>
-      <PlanGrid blocks={plan.blocks} {tool} {power} onchange={setBlocks} />
+      <PlanGrid blocks={plan.blocks} {paint} {piloted} onchange={setBlocks} />
+      {#if hasModes}
+        <p class="note muted">
+          {#if piloted}
+            PC allumé requis pour les blocs Auto, IA et UPS : la batterie reste au repos hors des créneaux Manuel, donc l'application envoie le mode au début du bloc et renvoie le plan à la fin. PC éteint, la batterie ne fait rien pendant ces blocs. Le test hors créneaux (plus bas) dit si elle suit déjà la consommation.
+          {:else}
+            Le test hors créneaux a montré que la batterie suit déjà la consommation : les blocs Auto, IA et UPS sont de simples trous, sans pilotage de l'application, PC éteint compris.
+          {/if}
+        </p>
+      {/if}
+      {#if hasLimits}
+        <p class="note muted">Les limites de SOC sont tenues par l'application : une fois la limite atteinte, elle maintient la batterie à l'arrêt (Passive 0 W) jusqu'à la fin du bloc. PC éteint, la batterie charge jusqu'à 100 % ou décharge jusqu'au DOD.</p>
+      {/if}
     </section>
 
     <section class="card" aria-label="Copier un jour">
@@ -169,6 +200,9 @@
   .tools { margin-bottom: 14px; }
   .legend { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.85rem; min-height: 34px; }
   .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .sw.mode { background: color-mix(in srgb, var(--grid) 28%, var(--surface-2)); margin-left: 8px; }
+  .sw.mode.piloted { background: repeating-linear-gradient(90deg, var(--grid) 0 3px, transparent 3px 6px), var(--surface-2); }
+  .note { margin-top: 10px; font-size: 0.85rem; }
   .sw.charge { background: var(--charge); }
   .sw.discharge { background: repeating-linear-gradient(135deg, var(--discharge) 0 4px, transparent 4px 6px), var(--surface-2); margin-left: 8px; }
   .send { align-items: center; }

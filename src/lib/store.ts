@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { configChanged, type Notify, type Plan, type Rules, type SlotTest, type Tariff } from "./api";
+import { migratePlan } from "./plan";
 
 export type Presets = { charge: { power: number; minutes: number }; discharge: { power: number; minutes: number } };
 export type Settings = {
@@ -16,7 +17,7 @@ export type Settings = {
 
 export const defaults = (): Settings => ({
   scanRange: "",
-  tariff: { offpeak: [{ start: "22:00", end: "06:00" }], chargePower: 800, dischargePower: 300, days: 127 },
+  tariff: { offpeak: [{ start: "22:00", end: "06:00" }], chargePower: 800, dischargePower: 300, days: 127, chargeSoc: 90, peak: "auto" },
   presets: { charge: { power: 800, minutes: 60 }, discharge: { power: 300, minutes: 60 } },
   plans: [],
   sentPlan: null,
@@ -34,7 +35,14 @@ export async function loadSettings(): Promise<Settings> {
   const base = defaults();
   const s = await open();
   const saved = await Promise.all(Object.keys(base).map(async (k) => [k, await s.get(k)] as const));
-  return { ...base, ...Object.fromEntries(saved.filter(([, v]) => v != null)) };
+  const merged: Settings = { ...base, ...Object.fromEntries(saved.filter(([, v]) => v != null)) };
+  // Réglages écrits avant le mode hybride : champs du tarif absents, blocs en `direction`.
+  return {
+    ...merged,
+    tariff: { ...base.tariff, ...merged.tariff },
+    plans: merged.plans.map(migratePlan),
+    sentPlan: merged.sentPlan && migratePlan(merged.sentPlan),
+  };
 }
 
 export async function saveSetting<K extends keyof Settings>(key: K, value: Settings[K]) {

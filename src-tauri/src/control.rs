@@ -2,9 +2,9 @@
 
 use crate::api::{Direction, Slot};
 use crate::clock::MINUTE;
-use crate::plan::{Plan, clock, minutes};
-use crate::settings::{Notify, Rules};
-use serde::Serialize;
+use crate::plan::{Block, Kind, Plan, clock, minutes};
+use crate::settings::{ModeKind, Notify, Rules};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Écart entre déclenchement et relâchement d'une règle SOC, en points.
@@ -30,6 +30,8 @@ pub enum Source {
     Plan,
     Rule,
     Manual,
+    /// Blocs auto, IA, UPS et limites de SOC du plan, tenus par l'application.
+    Hybrid,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -38,12 +40,29 @@ pub struct Control {
     pub detail: String,
 }
 
+/// Ce que l'application impose à la batterie à la place du plan Manual.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Drive {
+    /// Bloc auto, IA ou UPS.
+    Mode(ModeKind),
+    /// Limite de SOC atteinte : Passive 0 W jusqu'à la fin du bloc.
+    Hold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hybrid {
+    pub drive: Drive,
+    /// Fin du bloc (ms epoch).
+    pub until: i64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Engine {
     pub latch: Option<Side>,
     /// Fin de l'action manuelle (ms epoch), `FOREVER` sans plan à qui rendre la main.
     pub manual_until: Option<i64>,
     pub suspended: bool,
+    pub hybrid: Option<Hybrid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -113,6 +132,69 @@ pub fn passive_until(plan: Option<&Plan>, now_ms: i64, week_minute: u32, seconds
     manual_until(plan, now_ms, week_minute).min(now_ms + i64::from(seconds) * 1000)
 }
 
+/// Bloc qui couvre la minute de la semaine, et les minutes qui lui restent.
+pub fn current_block(plan: &Plan, week_minute: u32) -> Option<(&Block, u32)> {
+    let (day, minute) = (week_minute / 1440, week_minute % 1440);
+    plan.blocks.iter().find_map(|b| {
+        let (start, end) = (minutes(&b.start, false).ok()?, minutes(&b.end, true).ok()?);
+        (u32::from(b.day) == day && (start..end).contains(&minute)).then(|| (b, end - minute))
+    })
+}
+
+/// Pilotage que le bloc courant demande à l'application.
+/// Un bloc auto, IA ou UPS n'a rien à piloter si la batterie suit déjà la consommation hors créneaux.
+/// Une limite de SOC garde l'hystérésis des règles tant que le maintien est en cours (`holding`).
+pub fn hybrid_wanted(
+    plan: Option<&Plan>,
+    verdict: Option<Verdict>,
+    soc: Option<f64>,
+    now_ms: i64,
+    week_minute: u32,
+    holding: bool,
+) -> Option<Hybrid> {
+    let (block, left) = current_block(plan?, week_minute)?;
+    let drive = match block.kind.mode() {
+        Some(mode) => (verdict != Some(Verdict::Follows)).then_some(Drive::Mode(mode))?,
+        None => {
+            let limit = f64::from(block.soc_limit?);
+            let margin = if holding { HYSTERESIS } else { 0.0 };
+            let reached = soc.map_or(holding, |s| {
+                if block.kind == Kind::Charge { s >= limit - margin } else { s <= limit + margin }
+            });
+            reached.then_some(Drive::Hold)?
+        }
+    };
+    Some(Hybrid { drive, until: now_ms - now_ms.rem_euclid(MINUTE) + i64::from(left) * MINUTE })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HybridAction {
+    None,
+    Apply(Hybrid),
+    /// Le pilotage est fini : renvoyer les 10 créneaux du plan.
+    HandBack,
+}
+
+pub fn hybrid_step(active: Option<Hybrid>, wanted: Option<Hybrid>) -> HybridAction {
+    match (active, wanted) {
+        // Un mode n'expire pas : deux blocs contigus du même mode (minuit) ne demandent pas de nouvelle écriture.
+        (Some(a), Some(w)) if a.drive == w.drive && matches!(w.drive, Drive::Mode(_)) => HybridAction::None,
+        (a, Some(w)) if a != Some(w) => HybridAction::Apply(w),
+        (Some(_), None) => HybridAction::HandBack,
+        _ => HybridAction::None,
+    }
+}
+
+/// Durée du maintien passif : les secondes qui restent au bloc.
+pub fn hold_seconds(until_ms: i64, now_ms: i64) -> u32 {
+    ((until_ms - now_ms) / 1000).max(1) as u32
+}
+
+/// L'application a-t-elle mis la batterie hors du plan Manual ?
+pub fn off_plan(e: &Engine, testing: bool) -> bool {
+    e.latch.is_some() || e.manual_until.is_some() || e.hybrid.is_some() || testing
+}
+
 /// Alerte « SOC bas » : une fois par descente, ré-armée avec la même hystérésis. Rend (état, envoyer).
 pub fn low_soc_alert(n: &Notify, soc: Option<f64>, notified: bool) -> (bool, bool) {
     let Some(soc) = soc else { return (notified, false) };
@@ -132,7 +214,7 @@ pub fn offline_alert(enabled: bool, silent: Duration, notified: bool) -> (bool, 
     if silent > OFFLINE_AFTER { (true, enabled && !notified) } else { (false, false) }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
     Idle,
@@ -183,7 +265,6 @@ pub fn test_slot(week_minute: u32) -> Result<Slot, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::Block;
     use crate::settings::{ModeKind, Rule};
 
     fn rules(low: Option<f64>, high: Option<f64>) -> Rules {
@@ -196,7 +277,7 @@ mod tests {
             name: "p".into(),
             blocks: blocks
                 .iter()
-                .map(|&(day, s, e)| Block { day, start: s.into(), end: e.into(), direction: Direction::Charge, power: 500 })
+                .map(|&(day, s, e)| Block { day, start: s.into(), end: e.into(), kind: Kind::Charge, power: 500, soc_limit: None })
                 .collect(),
         }
     }
@@ -255,7 +336,7 @@ mod tests {
     #[test]
     fn rule_release_during_manual_action_does_not_hand_back() {
         let r = rules(Some(20.0), None);
-        let e = Engine { latch: Some(Side::Low), manual_until: Some(10_000), suspended: false };
+        let e = Engine { latch: Some(Side::Low), manual_until: Some(10_000), ..Engine::default() };
         let (e, a) = decide(&r, e, Some(30.0), 5000);
         assert_eq!((a, e.latch), (Action::None, None));
     }
@@ -340,5 +421,92 @@ mod tests {
         assert_eq!((s.start.as_str(), s.end.as_str(), s.days, s.power), ("14:58", "15:03", 0b100, 200));
         assert!(test_slot(1435).is_err());
         assert!(test_slot(1434).is_ok());
+    }
+
+    fn hybrid_plan(blocks: &[(Kind, u32, u32, Option<u8>)]) -> Plan {
+        let clock_at = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
+        Plan {
+            name: "h".into(),
+            blocks: blocks
+                .iter()
+                .map(|&(kind, s, e, soc_limit)| Block { day: 0, start: clock_at(s), end: clock_at(e), kind, power: 500, soc_limit })
+                .collect(),
+        }
+    }
+
+    const NOW: i64 = 5 * MINUTE;
+
+    #[test]
+    fn current_block_gives_the_block_and_the_minutes_left() {
+        let p = hybrid_plan(&[(Kind::Auto, 8 * 60, 10 * 60, None)]);
+        assert_eq!(current_block(&p, 9 * 60).map(|(b, left)| (b.kind, left)), Some((Kind::Auto, 60)));
+        assert!(current_block(&p, 8 * 60).is_some());
+        assert!(current_block(&p, 10 * 60).is_none());
+        assert!(current_block(&p, 1440 + 9 * 60).is_none());
+    }
+
+    #[test]
+    fn auto_blocks_are_piloted_unless_the_battery_already_follows_the_load() {
+        let p = hybrid_plan(&[(Kind::Ups, 0, 120, None)]);
+        let wanted = |v| hybrid_wanted(Some(&p), v, Some(50.0), NOW, 5, false);
+        let on = Some(Hybrid { drive: Drive::Mode(ModeKind::Ups), until: 120 * MINUTE });
+        assert_eq!(wanted(None), on);
+        assert_eq!(wanted(Some(Verdict::Idle)), on);
+        assert_eq!(wanted(Some(Verdict::Follows)), None);
+        assert_eq!(hybrid_wanted(None, None, None, NOW, 5, false), None);
+    }
+
+    #[test]
+    fn charge_limit_holds_once_the_target_is_reached() {
+        let p = hybrid_plan(&[(Kind::Charge, 0, 360, Some(90))]);
+        let wanted = |soc, holding| hybrid_wanted(Some(&p), Some(Verdict::Follows), soc, NOW, 5, holding).map(|h| h.drive);
+        assert_eq!(wanted(Some(89.0), false), None);
+        assert_eq!(wanted(Some(90.0), false), Some(Drive::Hold));
+        // le maintien ne se relâche pas sur un rebond de moins de 5 points
+        assert_eq!(wanted(Some(86.0), true), Some(Drive::Hold));
+        assert_eq!(wanted(Some(85.0), true), Some(Drive::Hold));
+        assert_eq!(wanted(Some(84.9), true), None);
+        assert_eq!(wanted(None, true), Some(Drive::Hold));
+        assert_eq!(wanted(None, false), None);
+    }
+
+    #[test]
+    fn discharge_limit_is_a_floor_and_a_block_without_limit_is_left_to_the_plan() {
+        let p = hybrid_plan(&[(Kind::Discharge, 0, 60, Some(20)), (Kind::Charge, 60, 120, None)]);
+        let wanted = |soc, minute| hybrid_wanted(Some(&p), None, Some(soc), NOW, minute, false);
+        assert_eq!(wanted(21.0, 5), None);
+        assert_eq!(wanted(20.0, 5).map(|h| (h.drive, h.until)), Some((Drive::Hold, 60 * MINUTE)));
+        assert_eq!(wanted(100.0, 70), None);
+        assert_eq!(wanted(0.0, 70), None);
+    }
+
+    #[test]
+    fn hybrid_step_applies_changes_and_hands_back_when_it_ends() {
+        let h = |until| Hybrid { drive: Drive::Hold, until };
+        assert_eq!(hybrid_step(None, Some(h(1))), HybridAction::Apply(h(1)));
+        assert_eq!(hybrid_step(Some(h(1)), Some(h(1))), HybridAction::None);
+        assert_eq!(hybrid_step(Some(h(1)), Some(h(2))), HybridAction::Apply(h(2)));
+        assert_eq!(hybrid_step(Some(h(1)), None), HybridAction::HandBack);
+        assert_eq!(hybrid_step(None, None), HybridAction::None);
+        let auto = |until| Hybrid { drive: Drive::Mode(ModeKind::Auto), until };
+        assert_eq!(hybrid_step(Some(auto(1)), Some(auto(2))), HybridAction::None);
+        let ups = Hybrid { drive: Drive::Mode(ModeKind::Ups), until: 2 };
+        assert_eq!(hybrid_step(Some(auto(1)), Some(ups)), HybridAction::Apply(ups));
+    }
+
+    #[test]
+    fn hold_lasts_until_the_end_of_the_block() {
+        assert_eq!(hold_seconds(10 * MINUTE, 4 * MINUTE + 30_000), 330);
+        assert_eq!(hold_seconds(1000, 5000), 1);
+    }
+
+    #[test]
+    fn app_control_is_off_plan() {
+        assert!(!off_plan(&Engine::default(), false));
+        assert!(off_plan(&Engine::default(), true));
+        assert!(off_plan(&Engine { latch: Some(Side::Low), ..Engine::default() }, false));
+        assert!(off_plan(&Engine { manual_until: Some(FOREVER), ..Engine::default() }, false));
+        let hybrid = Some(Hybrid { drive: Drive::Hold, until: 1 });
+        assert!(off_plan(&Engine { hybrid, ..Engine::default() }, false));
     }
 }

@@ -30,7 +30,7 @@
 
   {#if verdict}
     <p class="verdict" class:ok={verdict === "idle"} class:ko={verdict === "follows"} role="status">
-      {verdict === "idle" ? "Conforme : la batterie est restée au repos après la fin du créneau." : "Non conforme : la batterie a continué à charger ou décharger après la fin du créneau."}
+      {verdict === "idle" ? "Conforme : la batterie est restée au repos après la fin du créneau. Les blocs Auto, IA et UPS du planning sont pilotés par l'application (PC allumé requis)." : "Non conforme : la batterie a continué à charger ou décharger après la fin du créneau. Les blocs Auto, IA et UPS du planning n'ont alors pas besoin de l'application."}
       {#if !app.slotTest?.verdict && saved?.ts}<span class="muted"> Résultat du {new Date(saved.ts).toLocaleString("fr-FR")}.</span>{/if}
     </p>
   {/if}
