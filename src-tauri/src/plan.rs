@@ -1,12 +1,12 @@
 //! Planning hebdomadaire : blocs → créneaux Manuel, et tarif heures creuses → blocs.
 
 use crate::api::{ApiError, Direction, SLOTS, Slot};
+use crate::i18n::Msg;
 use crate::settings::ModeKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const DAY: u32 = 24 * 60;
-const DAY_NAMES: [&str; 7] = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"];
 
 #[derive(Debug, Deserialize)]
 pub struct Range {
@@ -104,7 +104,7 @@ pub fn minutes(s: &str, allow_24: bool) -> Result<u32, ApiError> {
     let parsed = s.split_once(':').and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)));
     match parsed {
         Some((h, m)) if h < 24 && m < 60 => Ok(h * 60 + m),
-        _ => Err(ApiError::Invalid(format!("heure invalide : « {s} » (attendu hh:mm)"))),
+        _ => Err(ApiError::Invalid(Msg::BadTime(s.to_owned()))),
     }
 }
 
@@ -127,10 +127,10 @@ pub fn compile_plan(blocks: &[Block]) -> Result<Vec<Slot>, ApiError> {
     for b in blocks {
         let (start, end) = (minutes(&b.start, false)?, minutes(&b.end, true)?);
         if end <= start {
-            return Err(ApiError::Invalid(format!("bloc invalide : {} doit finir après {}", b.end, b.start)));
+            return Err(ApiError::Invalid(Msg::BadBlock { end: b.end.clone(), start: b.start.clone() }));
         }
         days.get_mut(usize::from(b.day))
-            .ok_or_else(|| ApiError::Invalid(format!("jour invalide : {}", b.day)))?
+            .ok_or(ApiError::Invalid(Msg::BadDay(b.day)))?
             .push((start, end, b.kind, b.power));
     }
 
@@ -141,7 +141,7 @@ pub fn compile_plan(blocks: &[Block]) -> Result<Vec<Slot>, ApiError> {
         for &b in list.iter() {
             match merged.last_mut() {
                 Some(last) if b.0 < last.1 => {
-                    return Err(ApiError::Invalid(format!("des blocs se chevauchent le {}", DAY_NAMES[day])));
+                    return Err(ApiError::Invalid(Msg::Overlap(day)));
                 }
                 Some(last) if b.0 == last.1 && b.2 == last.2 && b.3 == last.3 => last.1 = b.1,
                 _ => merged.push(b),
@@ -154,10 +154,7 @@ pub fn compile_plan(blocks: &[Block]) -> Result<Vec<Slot>, ApiError> {
         }
     }
     if groups.len() > SLOTS {
-        return Err(ApiError::Invalid(format!(
-            "{} créneaux nécessaires, la batterie n'en accepte que {SLOTS} : simplifie le planning",
-            groups.len()
-        )));
+        return Err(ApiError::Invalid(Msg::SlotsNeeded(groups.len())));
     }
     Ok(groups
         .into_iter()
@@ -351,7 +348,7 @@ mod tests {
         let blocks: Vec<_> =
             (0..11).map(|i| block(0, &format!("{i:02}:00"), &format!("{i:02}:30"), Kind::Charge, 500)).collect();
         let err = compile_plan(&blocks).unwrap_err().to_string();
-        assert!(err.contains("11 créneaux"), "{err}");
+        assert!(err.contains("11 slots"), "{err}");
         assert_eq!(compile_plan(&blocks[..10]).unwrap().len(), 10);
     }
 
@@ -365,7 +362,7 @@ mod tests {
             block(3, "01:00", "05:00", Kind::Charge, 500),
             block(3, "04:00", "06:00", Kind::Discharge, 500),
         ];
-        assert!(compile_plan(&overlap).unwrap_err().to_string().contains("jeudi"));
+        assert!(compile_plan(&overlap).unwrap_err().to_string().contains("Thursday"));
     }
 
     #[test]

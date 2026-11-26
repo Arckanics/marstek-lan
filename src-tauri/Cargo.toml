@@ -7,6 +7,7 @@ repository = "https://github.com/Arckanics/marstek-lan"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+sha2 = "=0.11.0"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -17,6 +18,11 @@ serde_json = "1.0.154"
 tauri-plugin-notification = "=2.8.0"
 tauri-plugin-autostart = "=2.7.0"
 rusqlite = { version = "=0.41.1", features = ["bundled"] }
+if-addrs = "=0.15.0"
 ureq = "=3.5.1"
 md-5 = "=0.11.0"
+sha2 = "=0.11.0"
 keyring = "=4.2.0"
+# mTLS pour la réactivation de l'API locale via le cloud ; `ring` réutilise le fournisseur déjà tiré par ureq (pas d'aws-lc-rs).
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "=2.2.0"

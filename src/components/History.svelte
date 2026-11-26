@@ -2,17 +2,21 @@
   import { exportCsv, historyEnergy, historyPower, type EnergyRow, type PowerSeries } from "../lib/api";
   import { withHouse } from "../lib/energy";
   import { errText } from "../lib/state.svelte";
+  import { locale, t, type Key } from "../lib/i18n.svelte";
   import HistoryChart from "./HistoryChart.svelte";
+  import AverageDay from "./AverageDay.svelte";
+  import SocHistory from "./SocHistory.svelte";
+  import Savings from "./Savings.svelte";
 
   type Span = "day" | "week" | "month";
-  const spans: [Span, string][] = [["day", "Jour"], ["week", "Semaine"], ["month", "Mois"]];
-  const metrics = [["pv", "Solaire"], ["gridIn", "Soutiré"], ["gridOut", "Injecté"], ["load", "Consommé"]] as const;
+  const spans: Span[] = ["day", "week", "month"];
+  const metrics = ["pv", "gridIn", "gridOut", "load"] as const;
 
   const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   let span = $state<Span>("day");
   let date = $state(iso(new Date()));
-  let metric = $state<(typeof metrics)[number][0]>("pv");
+  let metric = $state<(typeof metrics)[number]>("pv");
   let power = $state<PowerSeries>();
   let energy = $state<EnergyRow[]>();
   let error = $state("");
@@ -34,13 +38,22 @@
   const title = $derived(
     range &&
       (span === "month"
-        ? range[0].toLocaleDateString("fr-FR", { month: "long", year: "numeric" })
-        : `${range[0].toLocaleDateString("fr-FR")}${span === "week" ? ` au ${new Date(range[1].getTime() - 1).toLocaleDateString("fr-FR")}` : ""}`),
+        ? range[0].toLocaleDateString(locale(), { month: "long", year: "numeric" })
+        : span === "week"
+          ? t("history.weekRange", { from: range[0].toLocaleDateString(locale()), to: new Date(range[1].getTime() - 1).toLocaleDateString(locale()) })
+          : range[0].toLocaleDateString(locale())),
   );
-  const totals = $derived(metrics.map(([k, name]) => [name, energy?.reduce((a, r) => a + (r[k] ?? 0), 0) ?? 0] as const));
-  const kwh = (wh: number) => `${(wh / 1000).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} kWh`;
+  const totals = $derived(metrics.map((k) => [k, energy?.reduce((a, r) => a + (r[k] ?? 0), 0) ?? 0] as const));
+  const kwh = (wh: number) => `${(wh / 1000).toLocaleString(locale(), { maximumFractionDigits: 2 })} kWh`;
+
+  let tick = $state(0);
+  $effect(() => {
+    const t = setInterval(() => tick++, 60_000);
+    return () => clearInterval(t);
+  });
 
   $effect(() => {
+    tick;
     if (!bounds) return;
     const [from, to] = bounds;
     const id = ++seq;
@@ -72,44 +85,50 @@
 </script>
 
 <div class="stack">
-  <section class="card" aria-label="Période">
+  <section class="card" aria-label={t("history.period")}>
     <div class="row">
-      <div class="seg" role="group" aria-label="Échelle">
-        {#each spans as [v, name]}<button aria-pressed={span === v} onclick={() => (span = v)}>{name}</button>{/each}
+      <div class="seg" role="group" aria-label={t("history.scale")}>
+        {#each spans as v}<button aria-pressed={span === v} onclick={() => (span = v)}>{t(`history.${v}` as Key)}</button>{/each}
       </div>
-      <label class="field">Date<input type="date" bind:value={date} max={iso(new Date())} required /></label>
-      <button class="btn" onclick={doExport} disabled={!bounds}>Exporter en CSV</button>
+      <label class="field">{t("common.date")}<input type="date" bind:value={date} max={iso(new Date())} required /></label>
+      <button class="btn" onclick={doExport} disabled={!bounds}>{t("history.export")}</button>
     </div>
-    {#if exported}<p class="ok" role="status">Fichier écrit : <span class="num">{exported}</span></p>{/if}
+    {#if exported}<p class="ok" role="status">{t("history.exported")} <span class="num">{exported}</span></p>{/if}
   </section>
 
-  <section class="card" aria-label="Historique">
-    <h3>{span === "day" ? "Puissances et SOC" : "Énergie par jour"}{title ? ` · ${title}` : ""}</h3>
+  <section class="card" aria-label={t("common.history")}>
+    <h3>{span === "day" ? t("history.powersSoc") : t("history.energyDay")}{title ? `, ${title}` : ""}</h3>
     {#if span !== "day"}
-      <div class="seg metric" role="group" aria-label="Grandeur affichée">
-        {#each metrics as [v, name]}<button aria-pressed={metric === v} onclick={() => (metric = v)}>{name}</button>{/each}
+      <div class="seg metric" role="group" aria-label={t("history.metric")}>
+        {#each metrics as v}<button aria-pressed={metric === v} onclick={() => (metric = v)}>{t(`history.${v}` as Key)}</button>{/each}
       </div>
     {/if}
     {#if error}
       <p class="err" role="alert">{error}</p>
     {:else if empty}
-      <p class="muted">Aucune mesure sur cette période.</p>
+      <p class="muted">{t("history.none")}</p>
     {/if}
     <div class:hide={error || empty}>
-      <HistoryChart {power} {energy} {metric} label="Courbe d'historique" />
+      <HistoryChart {power} {energy} {metric} label={t("history.curve")} />
     </div>
+    {#if energy?.length && range && range[1].getTime() > Date.now()}
+      <p class="muted">{t("history.provisional")}</p>
+    {/if}
     {#if energy?.length}
       <dl class="totals">
-        {#each totals as [name, wh]}<dt>Total {name.toLowerCase()}</dt><dd class="num">{kwh(wh)}</dd>{/each}
+        {#each totals as [k, wh]}<dt>{t(`history.total.${k}` as Key)}</dt><dd class="num">{kwh(wh)}</dd>{/each}
       </dl>
     {/if}
   </section>
+  <Savings bounds={bounds || undefined} />
+  <SocHistory />
+  <AverageDay />
 </div>
 
 <style>
-  .ok { margin-top: 10px; }
+  .ok { margin-top: 12px; }
   .err { color: var(--danger); }
-  .metric { margin-bottom: 10px; }
+  .metric { margin-bottom: 12px; }
   .hide { display: none; }
-  .totals { margin-top: 14px; max-width: 360px; }
+  .totals { margin-top: 16px; max-width: 360px; }
 </style>

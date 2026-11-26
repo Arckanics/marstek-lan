@@ -1,21 +1,22 @@
 <script lang="ts">
-  let { soc, bat }: { soc: number | undefined; bat: number | null } = $props();
+  import { t } from "../lib/i18n.svelte";
+  let { soc, bat, note }: { soc: number | undefined; bat: number | null; note?: string } = $props();
 
   const R = 52;
   const C = 2 * Math.PI * R;
   const pct = $derived(Math.max(0, Math.min(100, soc ?? 0)));
-  const state = $derived(bat == null || Math.abs(bat) < 10 ? "En veille" : bat > 0 ? "En charge" : "En décharge");
+  const state = $derived(bat == null || Math.abs(bat) < 10 ? t("gauge.idle") : bat > 0 ? t("gauge.charging") : t("gauge.discharging"));
   const color = $derived(bat == null || Math.abs(bat) < 10 ? "var(--muted)" : bat > 0 ? "var(--charge)" : "var(--discharge)");
 </script>
 
-<div class="gauge" role="meter" aria-label="Niveau de charge" aria-valuemin="0" aria-valuemax="100" aria-valuenow={soc} aria-valuetext={soc == null ? "inconnu" : `${pct} %`}>
+<div class="gauge" role="meter" aria-label={t("gauge.label")} aria-valuemin="0" aria-valuemax="100" aria-valuenow={soc} aria-valuetext={soc == null ? t("common.unknown") : `${pct} %`}>
   <svg viewBox="0 0 120 120" aria-hidden="true">
     <circle cx="60" cy="60" r={R} class="track" />
     <circle cx="60" cy="60" r={R} class="arc" stroke={color} stroke-dasharray="{(C * pct) / 100} {C}" transform="rotate(-90 60 60)" />
   </svg>
   <div class="txt">
     <strong class="num">{soc == null ? "—" : Math.round(pct)}<small>%</small></strong>
-    <span class="muted">{state}</span>
+    <span class="muted">{note ?? state}</span>
   </div>
 </div>
 

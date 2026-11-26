@@ -1,107 +1,186 @@
+/* Hallmark · shape: app screen · genre: atmospheric · theme: custom · redesign: full · modes: dark+light
+ * paper: oklch(16% 0.012 250) · accent: per mode (charge, décharge, Auto, IA, UPS, solaire, réseau) · display: Segoe UI Variable Display · body: Segoe UI Variable Text
+ * nav: kept, top tabs · signature: the day timeline of the planning tab · states: loading, empty, error, sync ok/warn/bad/unknown
+ * axes: dark/grotesk-sans/chromatic-multi · posture: tool · contrast: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S5 R3 V4 · weakest: R, seven mode hues compete; colour is reserved for meaning (mode, flow, state), chrome stays neutral and the primary button is ink, not a hue */
+/* Hallmark · dismissed 49 · .btn sets white-space: nowrap in this stylesheet; the linter reads each component alone */
+/* Hallmark · dismissed F3 · h1, h2, h3 carry text-wrap: balance here; the component heads inherit it */
+/* Hallmark · answered F1 · the French copy and the backend error strings share straight apostrophes; mixing two forms would read worse than either */
+
 :root {
-  color-scheme: light dark;
-  --bg: #f3f4f6;
-  --surface: #ffffff;
-  --surface-2: #eceff3;
-  --border: #d5dae1;
-  --text: #14181f;
-  --muted: #566072;
-  --primary: #14181f;
-  --on-primary: #ffffff;
-  --focus: #1f5fd1;
-  --danger: #b3261e;
-  --charge: #1f9d55;
-  --discharge: #e8710a;
-  --grid: #2a6fdb;
-  --solar: #e3a900;
-  --house: #6b7586;
-  --charge-ink: #14733f;
-  --discharge-ink: #a84c06;
-  --grid-ink: #1c4fb0;
-  --solar-ink: #7a5800;
+  color-scheme: dark light;
+
+  --bg: #0b0e13;
+  --surface: #12161d;
+  --surface-2: #1a2029;
+  --surface-3: #242c37;
+  --border: #2b3542;
+  --border-strong: #465465;
+  --text: #e8eef5;
+  --muted: #9aa6b6;
+  --primary: #e8eef5;
+  --on-primary: #0b0e13;
+  /* Bleu « système » façon Apple, pour le bouton principal. */
+  --apple-blue: #0a84ff;
+  --focus: #7fd6ff;
+  --scrim: #05070acc;
+
+  --charge: #3cf08c;
+  --discharge: #ff8f3c;
+  --auto: #4db5ff;
+  --ai: #b48eff;
+  --ups: #ff5aa8;
+  --solar: #ffd43b;
+  --grid: #8f9fb4;
+  --house: #c8d1dc;
+
+  --ok: #45e6a8;
+  --warn: #ffb648;
+  --danger: #ff5a6a;
+
+  --tint: 24%;
+  --glow: 55%;
+  --glow-soft: 14%;
+
+  --font-body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.857rem;
+  --text-md: 1rem;
+  --text-lg: 1.2rem;
+  --text-xl: 1.44rem;
+  --text-2xl: 2.4rem;
+
   --radius: 10px;
-  --shadow: 0 1px 2px rgb(20 24 31 / 0.06);
-  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --radius-sm: 6px;
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  font-family: var(--font-body);
   font-size: 14px;
   line-height: 1.45;
 }
 
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #0f1217;
-    --surface: #171b22;
-    --surface-2: #1f242d;
-    --border: #2d3440;
-    --text: #e8ebf0;
-    --muted: #9aa4b4;
-    --primary: #e8ebf0;
-    --on-primary: #0f1217;
-    --focus: #7db0ff;
-    --danger: #ff8a80;
-    --charge: #3ecf7f;
-    --discharge: #ff9a3c;
-    --grid: #5b9bff;
-    --solar: #ffd23f;
-    --house: #8b95a7;
-    --charge-ink: #3ecf7f;
-    --discharge-ink: #ff9a3c;
-    --grid-ink: #7db0ff;
-    --solar-ink: #ffd23f;
-    --shadow: none;
+    color-scheme: light;
+    --bg: #e9edf2;
+    --surface: #fbfcfe;
+    --surface-2: #f0f3f7;
+    --surface-3: #e2e7ee;
+    --border: #cdd5df;
+    --border-strong: #9aa6b4;
+    --text: #121821;
+    --muted: #4f5a69;
+    --primary: #121821;
+    --on-primary: #fbfcfe;
+    --apple-blue: #007aff;
+    --focus: #0a60c4;
+    --scrim: #121821a0;
+
+    --charge: #0d7a3e;
+    --discharge: #ad4c05;
+    --auto: #0b62c4;
+    --ai: #6c3ed0;
+    --ups: #b31e68;
+    --solar: #876000;
+    --grid: #56657a;
+    --house: #3b4553;
+
+    --ok: #0b7a55;
+    --warn: #8f5500;
+    --danger: #c4182f;
+
+    --tint: 16%;
+    --glow: 22%;
+    --glow-soft: 6%;
   }
 }
 
-* { box-sizing: border-box; }
+*, *::before, *::after { box-sizing: border-box; }
+html, body { overflow-x: clip; }
 html, body, #app { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--text); overflow: hidden; }
-h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.2; }
-h2 { font-size: 1.15rem; }
-h3 { font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+body { background: var(--bg); color: var(--text); overflow: hidden; -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { margin: 0; font-family: var(--font-display); font-weight: 600; line-height: 1.2; overflow-wrap: break-word; min-width: 0; text-wrap: balance; }
+h2 { font-size: var(--text-lg); }
+h3 { font-size: var(--text-md); }
 p { margin: 0; }
 button, input, select { font: inherit; color: inherit; }
 .num { font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+kbd { font-family: var(--font-mono); font-size: var(--text-xs); padding: 1px 4px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; color: inherit; }
 
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Mode tones: one class sets --k, every component reads it. */
+.k-charge { --k: var(--charge); }
+.k-discharge { --k: var(--discharge); }
+.k-auto { --k: var(--auto); }
+.k-ai { --k: var(--ai); }
+.k-ups { --k: var(--ups); }
+.k-solar { --k: var(--solar); }
+.k-grid { --k: var(--grid); }
+.k-house { --k: var(--house); }
+.k-ok { --k: var(--ok); }
+.k-warn { --k: var(--warn); }
+.k-bad { --k: var(--danger); }
+.k-none { --k: var(--muted); }
 
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
   padding: 16px;
 }
 .card > h3 { margin-bottom: 12px; }
 
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-height: 34px; padding: 0 14px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  cursor: pointer; font-weight: 500;
-  transition: background-color 0.12s, border-color 0.12s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 34px; padding: 0 16px;
+  background: linear-gradient(to bottom, var(--surface-3), var(--surface-2));
+  border: 1px solid var(--border); border-radius: 7px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.05);
+  cursor: pointer; font-weight: 500; white-space: nowrap;
+  transition: filter var(--dur-micro), box-shadow var(--dur-micro), transform var(--dur-micro), border-color var(--dur-micro);
 }
-.btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--muted); }
-.btn.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
-.btn.primary:hover:not(:disabled) { opacity: 0.88; background: var(--primary); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--border-strong); }
+.btn:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.96); box-shadow: inset 0 1px 3px rgb(0 0 0 / 0.25); }
+.btn.primary {
+  background: linear-gradient(to bottom, color-mix(in oklab, var(--apple-blue) 88%, white), var(--apple-blue));
+  color: #fff; border-color: color-mix(in oklab, var(--apple-blue) 65%, black); font-weight: 600;
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--apple-blue) 45%, transparent), inset 0 1px 0 rgb(255 255 255 / 0.3);
+}
+.btn.primary:hover:not(:disabled) { filter: brightness(1.06); }
+.btn.quiet { background: none; border-color: transparent; box-shadow: none; }
+.btn.quiet:hover:not(:disabled) { background: var(--surface-2); border-color: var(--border); filter: none; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn.danger { color: var(--danger); }
+.btn.tone { background: color-mix(in oklab, var(--k) var(--tint), var(--surface)); border-color: color-mix(in oklab, var(--k) 55%, var(--border)); }
+.btn.tone:hover:not(:disabled) { background: color-mix(in oklab, var(--k) calc(var(--tint) + 10%), var(--surface)); border-color: var(--k); }
 
-.field { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.field { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--muted); }
 .field input, .field select {
-  min-height: 34px; padding: 0 10px; background: var(--surface); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px;
+  min-height: 34px; padding: 0 12px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
-.field input:hover, .field select:hover { border-color: var(--muted); }
-input[type="range"] { accent-color: var(--primary); padding: 0; min-height: 0; border: 0; }
-input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--primary); }
+.field input:hover:not(:disabled), .field select:hover:not(:disabled) { border-color: var(--border-strong); }
+.field input:disabled { background: var(--surface-2); color: var(--muted); border-style: dashed; cursor: not-allowed; }
+input[type="range"] { accent-color: var(--text); padding: 0; min-height: 0; border: 0; }
+input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--text); }
 
-.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg); }
 .seg button {
-  min-height: 32px; padding: 0 12px; background: var(--surface); border: 0; cursor: pointer;
+  min-height: 32px; padding: 0 12px; background: none; border: 0; cursor: pointer; color: var(--muted);
+  transition: background-color var(--dur-micro), color var(--dur-micro);
 }
 .seg button + button { border-left: 1px solid var(--border); }
-.seg button[aria-pressed="true"] { background: var(--primary); color: var(--on-primary); }
-.seg button:disabled { opacity: 0.45; cursor: not-allowed; }
+.seg button:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.seg button[aria-pressed="true"], .seg button[aria-checked="true"] { background: var(--surface-3); color: var(--text); font-weight: 600; box-shadow: inset 0 -2px 0 var(--k, var(--text)); }
+.seg button:disabled { opacity: 0.4; cursor: not-allowed; }
 .seg button:focus-visible { outline-offset: -2px; }
 
 .row { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
@@ -109,22 +188,19 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--primary)
 .stack { display: grid; gap: 16px; }
 
 .badge {
-  display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px;
+  display: inline-flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 12px;
   border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2);
-  font-size: 0.8rem; font-weight: 500;
+  font-size: var(--text-sm); font-weight: 500; white-space: nowrap;
 }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.dot.on, .dot.good { background: var(--charge); }
-.dot.fair { background: var(--solar); }
-.dot.poor { background: var(--discharge); }
-.dot.offline { background: var(--danger); }
+.badge.tone { border-color: color-mix(in oklab, var(--k) 60%, var(--border)); background: color-mix(in oklab, var(--k) var(--tint), var(--surface)); }
+.swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--k, var(--muted)); flex: none; }
 
 .empty {
-  display: grid; justify-items: center; gap: 10px; padding: 48px 24px; text-align: center;
+  display: grid; justify-items: center; gap: 12px; padding: 48px 24px; text-align: center;
   border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted);
 }
 .empty svg { width: 40px; height: 40px; stroke: var(--muted); fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.empty strong { color: var(--text); font-size: 1.05rem; }
+.empty strong { color: var(--text); font-size: var(--text-lg); font-family: var(--font-display); }
 
 .spinner {
   width: 14px; height: 14px; border-radius: 50%;
@@ -134,14 +210,31 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--primary)
 @keyframes spin { to { transform: rotate(360deg); } }
 
 table { border-collapse: collapse; width: 100%; }
-th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
-th { font-size: 0.78rem; font-weight: 500; color: var(--muted); }
+th, td { padding: 8px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+th { font-size: var(--text-sm); font-weight: 500; color: var(--muted); }
 tr:last-child td { border-bottom: 0; }
 
-dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; }
 dt { color: var(--muted); }
 dd { margin: 0; text-align: right; }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
+details.more { border-top: 1px solid var(--border); }
+details.more > summary {
+  display: flex; align-items: center; gap: 12px; min-height: 44px; cursor: pointer; list-style: none;
+  font-family: var(--font-display); font-weight: 600;
 }
+details.more > summary::-webkit-details-marker { display: none; }
+details.more > summary::before { content: ""; width: 7px; height: 7px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: rotate(-45deg); transition: transform var(--dur-short) var(--ease-out); }
+details.more[open] > summary::before { transform: rotate(45deg); }
+details.more > summary:hover { color: var(--text); }
+details.more > summary .muted { font-family: var(--font-body); font-weight: 400; }
+details.more > :not(summary) { margin-bottom: 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+.u-tip { position: absolute; z-index: 5; pointer-events: none; padding: 6px 10px; font-size: var(--text-sm); line-height: 1.5; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+.u-tip strong { display: block; font-weight: 600; }
+.u-tip-dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
+.u-legend .u-series > * { cursor: pointer; }
